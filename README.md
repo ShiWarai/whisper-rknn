@@ -58,7 +58,7 @@
    docker compose up -d
    ```
 
-Другие контейнеры (например Telegram-бот) подключайте к `whisper_rknn_default` и обращайтесь к **`whisper-rknn-api:8080`**.
+Другие контейнеры (например Telegram-бот) подключайте к `whisper_rknn_default` и обращайтесь к **`whisper-rknn-api:${PORT}`** (у нас в `.env` — `9003`).
 
 ---
 
@@ -130,8 +130,10 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 ```bash
 docker run --rm --network whisper_rknn_default curlimages/curl:latest \
   -s -F "file=@/path/to/voice.ogg" \
-  http://whisper-rknn-api:8080/transcribe
+  http://whisper-rknn-api:9003/transcribe
 ```
+
+(порт задаётся через `PORT` в `.env`; по умолчанию в образе — `8080`)
 
 Полное описание: [docs/api.md](docs/api.md).
 
@@ -147,7 +149,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (для логов; volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
-| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера |
+| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
 
 ---
@@ -212,7 +214,7 @@ Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 
 ### Интеграция с ботом
 
-В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:8080` (или порт из override в compose).
+В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:9003` (порт из `.env` whisper-rknn).
 
 ---
 

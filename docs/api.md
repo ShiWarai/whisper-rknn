@@ -1,8 +1,8 @@
 # API
 
-HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию слушает `0.0.0.0:8080` **внутри** Docker-сети (порты на хост не публикуются).
+HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию слушает `0.0.0.0:8080` **внутри** Docker-сети (порты на хост не публикуются). Порт переопределяется через `PORT` в `.env` (для связки с ботом — `9003`).
 
-Базовый URL в compose-сети: `http://whisper-rknn-api:8080`
+Базовый URL в compose-сети: `http://whisper-rknn-api:${PORT}` (пример ниже — с `PORT=9003`).
 
 ## `GET /health`
 
@@ -53,15 +53,15 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 
 ```bash
 docker run --rm --network whisper_rknn_default curlimages/curl:latest \
-  -s http://whisper-rknn-api:8080/health
+  -s http://whisper-rknn-api:9003/health
 
 docker run --rm --network whisper_rknn_default \
   -v /path/to/audio:/data:ro \
   curlimages/curl:latest \
   -s -F "file=@/data/voice.ogg" \
-  http://whisper-rknn-api:8080/transcribe
+  http://whisper-rknn-api:9003/transcribe
 ```
 
 ## OpenAPI
 
-При локальной отладке с пробросом порта: `http://localhost:8080/docs`.
+При локальной отладке с пробросом порта: `http://localhost:${PORT}/docs`.
