@@ -1,0 +1,5 @@
+# Продакшен: образ из GHCR (тег :main). Сборка локально не выполняется.
+services:
+  whisper-rknn:
+    image: ghcr.io/shiwarai/whisper-rknn:main
+    build: !override null

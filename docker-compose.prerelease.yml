@@ -1,0 +1,6 @@
+# Тестовое окружение: образ с тегом :prerelease из GHCR.
+# Предварительно: docker pull ghcr.io/shiwarai/whisper-rknn:prerelease
+services:
+  whisper-rknn:
+    image: ghcr.io/shiwarai/whisper-rknn:prerelease
+    build: !override null

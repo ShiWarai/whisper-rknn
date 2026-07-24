@@ -1,0 +1,48 @@
+# Только внутренняя связность: без портов на хост. Перед первым запуском:
+#   docker network create whisper_rknn_default
+# Другие контейнеры (бот и т.д.) подключайте к той же сети.
+#
+# Путь к папке с .rknn на хосте задаётся один раз: WHISPER_MODELS_DIR в файле .env
+
+name: whisper-rknn
+
+services:
+  whisper-rknn:
+    build: .
+    image: whisper-rknn-api:latest
+    platform: linux/arm64
+    container_name: whisper-rknn-api
+    privileged: true
+    restart: unless-stopped
+    environment:
+      WHISPER_MODELS_DIR: ${WHISPER_MODELS_DIR}
+      WHISPER_MODEL_PROFILE: ${WHISPER_MODEL_PROFILE}
+      WHISPER_ENCODER: /models/encoder.rknn
+      WHISPER_DECODER: /models/decoder.rknn
+      WHISPER_TOKENS: /models/tokens.txt
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      MAX_UPLOAD_MB: "25"
+    volumes:
+      - ${WHISPER_MODELS_DIR}:/models:ro
+    networks:
+      - whisper_rknn_default
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,urllib.request; p=os.environ.get('PORT','8080'); urllib.request.urlopen('http://127.0.0.1:%s/health' % p, timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  whisper_cache:
+
+networks:
+  whisper_rknn_default:
+    external: true

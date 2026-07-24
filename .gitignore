@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+
+# Кэш и временные файлы проекта
+.cache/
+*.log
+
+# Локальные секреты
+.env
+.env.*
+!.env.example
+
+# Тестовые/загруженные аудио (при необходимости закоммитьте конкретные файлы через git add -f)
+*.wav
+*.mp3
+*.ogg
+*.opus
+*.m4a
+*.flac
+
+# IDE / инструменты
+.idea/
+.vscode/
+.cursor/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db

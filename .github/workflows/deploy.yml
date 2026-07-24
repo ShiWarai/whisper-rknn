@@ -1,0 +1,162 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      publish_prerelease:
+        description: "Собрать и опубликовать prerelease-образ в GHCR (тег :prerelease)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/shiwarai/whisper-rknn
+
+jobs:
+  test:
+    name: Run tests in Docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set runner user for containers
+        run: |
+          echo "RUNNER_UID=$(id -u)" >> $GITHUB_ENV
+          echo "RUNNER_GID=$(id -g)" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: .
+          file: ./Dockerfile.dev
+          tags: whisper-rknn-dev:latest
+          load: true
+          push: false
+
+      - name: Lint with ruff
+        run: |
+          set -e
+          docker compose -f docker-compose.dev.yml run --rm -T dev ruff check . --output-format=github
+
+      - name: Run tests in container
+        run: |
+          docker compose -f docker-compose.dev.yml run --rm dev pytest tests/ -v --tb=short
+
+  publish-prerelease:
+    name: Publish prerelease image to GHCR
+    needs: test
+    if: |
+      needs.test.result == 'success' && (
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_prerelease == 'true') ||
+        (github.event_name == 'push' && github.ref == 'refs/heads/dev' && contains(github.event.head_commit.message, '[prerelease]'))
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push whisper-rknn (prerelease)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          tags: |
+            ${{ env.IMAGE_NAME }}:prerelease
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          push: true
+          provenance: false
+
+  notify-telegram:
+    name: Notify Telegram
+    needs: [test, publish-prerelease]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tests failed
+        if: needs.test.result != 'success'
+        uses: appleboy/telegram-action@v1.0.1
+        continue-on-error: true
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          format: markdown
+          message: |
+            *Тесты не прошли*
+            Репозиторий: `${{ github.repository }}`
+            Ветка: `${{ github.ref_name }}`
+            [Открыть run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Tests OK, prerelease failed
+        if: needs.test.result == 'success' && needs.publish-prerelease.result == 'failure'
+        uses: appleboy/telegram-action@v1.0.1
+        continue-on-error: true
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          format: markdown
+          message: |
+            *Тесты прошли, prerelease не удался*
+            Репозиторий: `${{ github.repository }}`
+            Ветка: `${{ github.ref_name }}`
+            [Открыть run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Tests OK, prerelease published
+        if: needs.test.result == 'success' && needs.publish-prerelease.result == 'success'
+        uses: appleboy/telegram-action@v1.0.1
+        continue-on-error: true
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          format: markdown
+          disable_notification: true
+          message: |
+            *Тесты и prerelease успешны*
+            Репозиторий: `${{ github.repository }}`
+            Ветка: `${{ github.ref_name }}`
+            Тег: `:prerelease` и `:${{ github.sha }}`
+            Образ: `ghcr.io/shiwarai/whisper-rknn:prerelease`
+            [Открыть run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+      - name: Tests OK (no prerelease)
+        if: needs.test.result == 'success' && needs.publish-prerelease.result == 'skipped'
+        uses: appleboy/telegram-action@v1.0.1
+        continue-on-error: true
+        with:
+          to: ${{ secrets.TELEGRAM_TO }}
+          token: ${{ secrets.TELEGRAM_TOKEN }}
+          format: markdown
+          disable_notification: true
+          message: |
+            *Тесты прошли успешно*
+            Репозиторий: `${{ github.repository }}`
+            Ветка: `${{ github.ref_name }}`
+            [Открыть run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})

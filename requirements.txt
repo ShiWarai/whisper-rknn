@@ -1,0 +1,15 @@
+# Слой образа Docker (linux/arm64). PyTorch CPU:
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+numpy>=1.26,<2
+soundfile>=0.12
+kaldi_native_fbank>=1.22
+torch
+openai-whisper>=20231117
+
+# HTTP API
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12
+
+# rknn_toolkit_lite2 ставится в Dockerfile из third_party/*.whl (не в PyPI).
