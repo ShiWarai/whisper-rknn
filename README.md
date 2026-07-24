@@ -152,8 +152,7 @@ whisper-rknn/
 │   └── cicd.md
 ├── .github/workflows/
 │   ├── deploy.yml
-│   ├── publish.yml
-│   └── release.yml
+│   └── publish.yml
 ├── Dockerfile
 ├── Dockerfile.dev
 ├── docker-compose.yml
@@ -186,9 +185,8 @@ docker compose -f docker-compose.dev.yml run --rm dev pytest tests/ -v --tb=shor
 | **Deploy** | Push `main` / `dev` | ruff + pytest |
 | **Deploy → prerelease** | `[prerelease]` в коммите на `dev` | `:prerelease` в GHCR |
 | **Publish** | Успешный Deploy на `main` | `:main` в GHCR |
-| **Release** | Тег `v*.*.*` | `:vX.Y.Z` + GitHub Release + deploy zip |
 
-Образ: `ghcr.io/shiwarai/whisper-rknn` (**только** `linux/arm64`).
+Образ: `ghcr.io/shiwarai/whisper-rknn` (**только** `linux/arm64`). Теги: `:main`, `:prerelease`, `:<git-sha>`.
 
 Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 

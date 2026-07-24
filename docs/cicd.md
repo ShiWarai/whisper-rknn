@@ -9,7 +9,6 @@
 | **Deploy** (`deploy.yml`) | Push в `main` / `dev`, ручной запуск | Dev-образ, ruff + pytest |
 | **Deploy → prerelease** | Push в `dev` с `[prerelease]` в коммите, или ручной флаг `publish_prerelease` | Образ `:prerelease` в GHCR |
 | **Publish** (`publish.yml`) | Успешный Deploy на `main` | Образ `:main` в GHCR |
-| **Release** (`release.yml`) | Push тега `v*.*.*` | Образ `:vX.Y.Z`, GitHub Release + deploy zip |
 
 ## Образ GHCR
 
@@ -17,7 +16,7 @@
 ghcr.io/shiwarai/whisper-rknn
 ```
 
-Теги: `:main`, `:prerelease`, `:vX.Y.Z`, `:<git-sha>`.
+Теги: `:main`, `:prerelease`, `:<git-sha>`.
 
 ## Prerelease
 
@@ -45,15 +44,6 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 docker pull ghcr.io/shiwarai/whisper-rknn:main
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 ```
-
-## Semver-релиз
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-Workflow **Release** соберёт образ `ghcr.io/shiwarai/whisper-rknn:v0.1.0` и создаст GitHub Release с zip (`docker-compose`, `.env.example`, `DEPLOY.md`).
 
 ## Локальные тесты (как в CI)
 
