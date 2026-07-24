@@ -29,6 +29,8 @@ git push origin dev
 
 **Вручную** — Actions → Deploy → Run workflow → включить `publish_prerelease`.
 
+Сборка prerelease использует **GHA cache** BuildKit (`cache-from` / `cache-to`, scope `whisper-rknn-prerelease`) — повторные сборки быстрее, пока не меняются слои `Dockerfile` / `requirements.txt`.
+
 На тестовом стенде:
 
 ```bash
