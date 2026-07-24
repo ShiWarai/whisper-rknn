@@ -1,0 +1,13 @@
+.venv
+.git
+.cache
+.env
+.env.*
+!.env.example
+**/*.wav
+**/*.mp3
+**/*.ogg
+**/__pycache__
+*.pyc
+.pytest_cache
+.cursor
