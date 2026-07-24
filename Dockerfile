@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/whisper-rknn
@@ -27,10 +27,13 @@ RUN set -e; \
     rm -rf /tmp/rknn_bundle
 
 COPY app/ ./app/
+COPY scripts/docker-entrypoint.sh scripts/download_models.sh ./scripts/
+RUN chmod +x ./scripts/docker-entrypoint.sh ./scripts/download_models.sh
 
 ENV WHISPER_ENCODER=/models/encoder.rknn \
     WHISPER_DECODER=/models/decoder.rknn \
     WHISPER_TOKENS=/models/tokens.txt \
+    WHISPER_MODEL_PROFILE=turbo \
     PORT=8080 \
     HOST=0.0.0.0
 
@@ -40,4 +43,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import os,urllib.request; p=os.environ.get('PORT','8080'); urllib.request.urlopen('http://127.0.0.1:%s/health' % p, timeout=5)"
 
-CMD ["python", "-m", "app.api_server"]
+CMD ["./scripts/docker-entrypoint.sh"]

@@ -15,8 +15,10 @@ services:
     privileged: true
     restart: unless-stopped
     environment:
+      WHISPER_DOWNLOAD_MODELS: ${WHISPER_DOWNLOAD_MODELS:-0}
+      WHISPER_MODEL_URLS: ${WHISPER_MODEL_URLS:-}
       WHISPER_MODELS_DIR: ${WHISPER_MODELS_DIR}
-      WHISPER_MODEL_PROFILE: ${WHISPER_MODEL_PROFILE}
+      WHISPER_MODEL_PROFILE: ${WHISPER_MODEL_PROFILE:-turbo}
       WHISPER_ENCODER: /models/encoder.rknn
       WHISPER_DECODER: /models/decoder.rknn
       WHISPER_TOKENS: /models/tokens.txt
@@ -24,7 +26,7 @@ services:
       PORT: "8080"
       MAX_UPLOAD_MB: "25"
     volumes:
-      - ${WHISPER_MODELS_DIR}:/models:ro
+      - ${WHISPER_MODELS_DIR}:/models
     networks:
       - whisper_rknn_default
     healthcheck:

@@ -48,7 +48,7 @@
 
    ```bash
    cp .env.example .env
-   # Задайте WHISPER_MODELS_DIR — путь к encoder.rknn, decoder.rknn, tokens.txt на хосте
+   # WHISPER_MODELS_DIR и WHISPER_DOWNLOAD_MODELS=turbo — см. .env.example
    ```
 
 3. Соберите и запустите:
@@ -74,6 +74,19 @@ docker compose up -d
 ```
 
 Сервис: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются.
+
+### Автозагрузка turbo
+
+Как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm) — при старте контейнера:
+
+```bash
+# в .env
+WHISPER_DOWNLOAD_MODELS=turbo
+WHISPER_MODEL_PROFILE=turbo
+WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
+```
+
+Источник: [HF ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo) (~1.8 GB, скачивается один раз в volume).
 
 ### Продакшен (образ из GHCR)
 
@@ -129,7 +142,9 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_ENCODER` | `/models/encoder.rknn` | Encoder внутри контейнера |
 | `WHISPER_DECODER` | `/models/decoder.rknn` | Decoder |
 | `WHISPER_TOKENS` | `/models/tokens.txt` | Токены |
-| `WHISPER_MODEL_PROFILE` | — | `tiny`/`base`/`small`/`medium`/`turbo`, если размер не в пути |
+| `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
+| `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
+| `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (для логов; volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера |
@@ -158,6 +173,9 @@ whisper-rknn/
 ├── docker-compose.yml
 ├── docker-compose.prod.yml
 ├── docker-compose.prerelease.yml
+├── scripts/
+│   ├── docker-entrypoint.sh
+│   └── download_models.sh
 ├── docker-compose.dev.yml
 └── requirements.txt
 ```
