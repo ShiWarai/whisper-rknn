@@ -48,7 +48,7 @@
 
    ```bash
    cp .env.example .env
-   # WHISPER_MODELS_DIR и WHISPER_DOWNLOAD_MODELS=turbo — см. .env.example
+   # WHISPER_MODELS_DIR, WHISPER_LANGUAGE=ru, PORT=9003 — см. .env.example
    ```
 
 3. Соберите и запустите:
@@ -83,6 +83,7 @@ docker compose up -d
 # в .env
 WHISPER_DOWNLOAD_MODELS=turbo
 WHISPER_MODEL_PROFILE=turbo
+WHISPER_LANGUAGE=ru
 WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
 ```
 
@@ -147,6 +148,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
+| `WHISPER_LANGUAGE` | `ru` | Язык распознавания: код Whisper (`ru`, `en`, `uk`, …). **Обязательно** задать под ваше аудио — иначе turbo может «галлюцинировать» на английском |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (для логов; volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
@@ -214,7 +216,7 @@ Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 
 ### Интеграция с ботом
 
-В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:9003` (порт из `.env` whisper-rknn).
+В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:9003` (порт из `.env` whisper-rknn). Язык распознавания настраивается в `.env` whisper-rknn: **`WHISPER_LANGUAGE=ru`** (или `en`, `uk`, …).
 
 ---
 

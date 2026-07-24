@@ -19,6 +19,7 @@ services:
       WHISPER_MODEL_URLS: ${WHISPER_MODEL_URLS:-}
       WHISPER_MODELS_DIR: ${WHISPER_MODELS_DIR}
       WHISPER_MODEL_PROFILE: ${WHISPER_MODEL_PROFILE:-turbo}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-ru}
       WHISPER_ENCODER: /models/encoder.rknn
       WHISPER_DECODER: /models/decoder.rknn
       WHISPER_TOKENS: /models/tokens.txt

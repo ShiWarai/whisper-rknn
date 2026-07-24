@@ -313,9 +313,35 @@ def decode_utterance(
     idx = out[0][0, 0].argmax()
     eot = model.eot
     ans = []
+    max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
+
+    def _repeating_tail(tokens: List[int]) -> bool:
+        """Stop if the same 1–4 token pattern repeats at the end."""
+        for n in (1, 2, 3, 4):
+            need = n * max_ngram_repeats
+            if len(tokens) < need:
+                continue
+            pattern = tokens[-n:]
+            ok = True
+            for r in range(1, max_ngram_repeats):
+                start = len(tokens) - (r + 1) * n
+                if tokens[start : start + n] != pattern:
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
 
     while idx != eot and offset.item() < 100:
         ans.append(idx)
+        if _repeating_tail(ans):
+            # Drop the repeating tail pattern copies beyond one occurrence
+            for n in (1, 2, 3, 4):
+                need = n * max_ngram_repeats
+                if len(ans) >= need and ans[-n:] * max_ngram_repeats == ans[-need:]:
+                    ans = ans[: len(ans) - n * (max_ngram_repeats - 1)]
+                    break
+            break
         token = np.array([[idx]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
         out = model.run_decoder(
@@ -360,6 +386,25 @@ def _infer_model_size_key(encoder_path: str, profile: Optional[str]) -> str:
     )
 
 
+def _language_token_id(lang: str) -> int:
+    """Whisper multilingual language token (e.g. ru -> 50263)."""
+    code = (lang or "ru").strip().lower()
+    if openai_whisper is None:
+        # Fallback for common codes when openai-whisper is not installed
+        fallback = {"en": 50259, "ru": 50263, "uk": 50276, "de": 50261, "es": 50262}
+        if code not in fallback:
+            raise ValueError(
+                f"WHISPER_LANGUAGE={code!r} needs openai-whisper, or one of: "
+                f"{', '.join(sorted(fallback))}"
+            )
+        return fallback[code]
+    tokenizer = openai_whisper.tokenizer.get_tokenizer(True)
+    try:
+        return int(tokenizer.to_language_token(code))
+    except KeyError as e:
+        raise ValueError(f"Unknown WHISPER_LANGUAGE={code!r}") from e
+
+
 def model_config_from_encoder_path(
     encoder_path: str,
     profile: Optional[str] = None,
@@ -367,6 +412,7 @@ def model_config_from_encoder_path(
     """Return decoder hyperparams + mel shape for a given encoder .rknn path."""
     prof_env = os.environ.get("WHISPER_MODEL_PROFILE") or os.environ.get("WHISPER_VARIANT")
     size_key = _infer_model_size_key(encoder_path, profile if profile is not None else prof_env)
+    lang = os.environ.get("WHISPER_LANGUAGE", "ru")
 
     enc = encoder_path
     if ".en" in enc:
@@ -374,12 +420,15 @@ def model_config_from_encoder_path(
         eot = 50256
         n_mels, mel_time_frames = 80, 3000
     elif size_key == "turbo":
-        # OpenAI large-v3-turbo: multilingual, sot + lang + transcribe + no_timestamps
-        sot_sequence = [50258, 50259, 50360, 50364]
+        # large-v3 / turbo: vocab with 100 languages → transcribe=50360, notimestamps=50364
+        lang_id = _language_token_id(lang)
+        sot_sequence = [50258, lang_id, 50360, 50364]
         eot = 50257
         n_mels, mel_time_frames = 128, 3000
     else:
-        sot_sequence = [50258, 50259, 50359, 50363]
+        # tiny..medium multilingual (99 langs): transcribe=50359, notimestamps=50363
+        lang_id = _language_token_id(lang)
+        sot_sequence = [50258, lang_id, 50359, 50363]
         eot = 50257
         n_mels, mel_time_frames = 80, 3000
 

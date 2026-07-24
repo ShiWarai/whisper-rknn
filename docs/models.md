@@ -17,9 +17,27 @@
 ```bash
 WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
 WHISPER_MODEL_PROFILE=turbo
+WHISPER_LANGUAGE=ru
 ```
 
 Compose монтирует каталог в `/models` (read-write, чтобы при автозагрузке файлы сохранялись на хосте).
+
+## Язык распознавания (`WHISPER_LANGUAGE`)
+
+Turbo — **мультиязычная** модель: перед декодированием в prompt подставляется language token (`ru` → `50263`, `en` → `50259` и т.д.).
+
+```bash
+WHISPER_LANGUAGE=ru   # по умолчанию в compose
+# WHISPER_LANGUAGE=en
+```
+
+Если язык не совпадает с аудио, результат может быть пустым, на другом языке или с повторами (например «What?» вместо русской речи). После смены языка перезапустите контейнер:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+Коды — как в [Whisper](https://github.com/openai/whisper) (`ru`, `en`, `uk`, `de`, …).
 
 ## Автозагрузка turbo при старте
 
@@ -28,6 +46,7 @@ Compose монтирует каталог в `/models` (read-write, чтобы �
 ```bash
 WHISPER_DOWNLOAD_MODELS=turbo   # или 1
 WHISPER_MODEL_PROFILE=turbo
+WHISPER_LANGUAGE=ru
 ```
 
 Entrypoint выставляет `WHISPER_ENCODER` / `WHISPER_DECODER` / `WHISPER_TOKENS` и `WHISPER_MODEL_PROFILE=turbo`.

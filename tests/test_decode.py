@@ -30,7 +30,8 @@ def test_causal_mask_1d():
     assert mask.tolist() == [0, 0, 1, 1, 1]
 
 
-def test_model_config_base_from_path():
+def test_model_config_base_from_path(monkeypatch):
+    monkeypatch.setenv("WHISPER_LANGUAGE", "en")
     cfg = model_config_from_encoder_path("/models/base-encoder.rknn")
     sot, eot, n_layer, n_ctx, n_state, n_mels, mel_frames = cfg
     assert sot == [50258, 50259, 50359, 50363]
@@ -44,8 +45,11 @@ def test_model_config_base_from_path():
 
 def test_model_config_turbo_profile(monkeypatch):
     monkeypatch.setenv("WHISPER_MODEL_PROFILE", "turbo")
+    monkeypatch.setenv("WHISPER_LANGUAGE", "ru")
     cfg = model_config_from_encoder_path("/models/encoder.rknn")
-    _, _, n_layer, _, n_state, n_mels, _ = cfg
+    sot, eot, n_layer, _, n_state, n_mels, _ = cfg
+    assert sot == [50258, 50263, 50360, 50364]  # ru + turbo specials
+    assert eot == 50257
     assert n_layer == 4
     assert n_state == 1280
     assert n_mels == 128
