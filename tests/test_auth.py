@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from app.auth import (
     auth_enabled,
@@ -42,8 +43,10 @@ def test_whisper_key_takes_precedence(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     reload_api_keys()
     verify_api_key("Bearer sk-whisper")
-    with pytest.raises(Exception):
+    with pytest.raises(HTTPException) as exc_info:
         verify_api_key("Bearer sk-openai")
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail["error"]["code"] == "invalid_api_key"
 
 
 def test_multiple_keys(monkeypatch):
