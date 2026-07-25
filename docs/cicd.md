@@ -31,10 +31,6 @@ git push origin dev
 
 Сборка prerelease использует **GHA cache** BuildKit (`cache-from` / `cache-to`, scope `whisper-rknn-prerelease`) — повторные сборки быстрее, пока не меняются слои `Dockerfile` / `requirements.txt`.
 
-Job **test** (dev-образ `Dockerfile.dev`) — тот же механизм, scope `whisper-rknn-dev` (pip-слои кэшируются между push в `main` / `dev`).
-
-Workflow **Publish** (`:main`) — scope `whisper-rknn-main`.
-
 На тестовом стенде:
 
 ```bash
@@ -74,8 +70,7 @@ Secrets репозитория (Settings → Secrets and variables → Actions):
 
 - Включены **GitHub Actions** и **Packages** (GHCR).
 - Для публичного образа: visibility пакета `whisper-rknn` → Public (при необходимости).
-- `third_party/` с `.whl`, `librknnrt.so` и `ffmpeg-rockchip/` должен быть в git (для prod-сборки в CI).
-- Prod-образ ~400 MB (`linux/arm64`): slim Python, без PyTorch/openai-whisper.
+- `third_party/` с `.whl` и `librknnrt.so` должен быть в git (для prod-сборки в CI).
 
 ## Self-hosted runner
 
