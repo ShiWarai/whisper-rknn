@@ -48,6 +48,8 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.event.workflow_run.head_sha }}
           push: true
           provenance: false
+          cache-from: type=gha,scope=whisper-rknn-main
+          cache-to: type=gha,mode=max,scope=whisper-rknn-main
 
   notify-telegram-on-publish:
     name: Notify Telegram on image published
