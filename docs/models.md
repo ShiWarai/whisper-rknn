@@ -24,7 +24,7 @@ Compose монтирует каталог в `/models` (read-write, чтобы �
 
 ## Язык распознавания (`WHISPER_LANGUAGE`)
 
-Turbo — **мультиязычная** модель: перед декодированием в prompt подставляется language token (`ru` → `50263`, `en` → `50259` и т.д.).
+Turbo — **мультиязычная** модель: перед декодированием в prompt подставляется language token (`ru` → `50263`, `en` → `50259` и т.д.). Маппинг встроен в `app/whisper_languages.py` (99 кодов Whisper, **без** зависимости от `openai-whisper`).
 
 ```bash
 WHISPER_LANGUAGE=ru   # по умолчанию в compose
@@ -37,7 +37,13 @@ WHISPER_LANGUAGE=ru   # по умолчанию в compose
 docker compose up -d --force-recreate
 ```
 
-Коды — как в [Whisper](https://github.com/openai/whisper) (`ru`, `en`, `uk`, `de`, …).
+Коды — как в [Whisper](https://github.com/openai/whisper) (`ru`, `en`, `uk`, `de`, `zh`, …).
+
+## Длинное аудио
+
+Окно encoder RKNN фиксировано (~30 с). Для подкастов, длинных голосовых и т.п. включена **нарезка с overlap** и склейка текста (см. [docs/api.md](api.md#длинное-аудио-30-с)).
+
+По умолчанию overlap **5 с** — достаточно для стыковки фраз на границе окон. Уменьшить overlap (`0`) — быстрее, но выше риск обрезать слово на стыке.
 
 ## Автозагрузка turbo при старте
 
@@ -72,6 +78,7 @@ WHISPER_MODEL_PROFILE=turbo
 1. Модели `.rknn` должны быть собраны toolchain, совместимым с `librknnrt.so` из [`third_party/`](../third_party/README.md).
 2. Целевая платформа inference: **RK3588** (`privileged: true` в compose для доступа к NPU).
 3. Версия `rknn_toolkit_lite2` / `librknnrt.so` в образе: **2.3.2** ([airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2), см. `Dockerfile`).
+4. Декод аудио: **ffmpeg-rockchip** из `third_party/` (те же бинарники, что в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)); устройства MPP/RGA в `docker-compose.yml`.
 
 ## Раскладка файлов
 

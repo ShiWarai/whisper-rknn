@@ -17,22 +17,17 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-# Import torch before rknnlite: rknnlite replaces logging._nameToLevel and breaks torch import.
-import kaldi_native_fbank as knf
 import numpy as np
 import soundfile as sf
-import torch
+
+from app.audio_features import compute_features
+from app.whisper_languages import language_token_id
 
 try:
     from rknnlite.api import RKNNLite
 except ImportError:
     print("Install rknn_toolkit_lite2 (см. Docker-сборку и каталог third_party/*.whl).")
     raise
-
-try:
-    import whisper as openai_whisper
-except ImportError:
-    openai_whisper = None  # type: ignore[misc, assignment]
 
 
 def _install_root() -> Path:
@@ -105,7 +100,7 @@ def prepare_audio_16k_mono(
     if not src.is_file():
         raise FileNotFoundError(f"Audio not found: {input_path}")
 
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
     if ffmpeg:
         fd, tmp = tempfile.mkstemp(suffix=".wav", prefix="whisper_rknn_", dir=cache_dir)
         os.close(fd)
@@ -147,54 +142,6 @@ def prepare_audio_16k_mono(
     tmp_path = Path(tmp)
     sf.write(str(tmp_path), mono, 16000, subtype="PCM_16")
     return str(tmp_path), tmp_path
-
-
-def compute_features(
-    samples: np.ndarray,
-    n_mels: int = 80,
-    target_frames: int = 3000,
-) -> np.ndarray:
-    """
-    Энкодер ожидает float32 [1, n_mels, target_frames].
-    turbo (128 mels): как в export_onnx — pad_or_trim + whisper.log_mel_spectrogram.
-    tiny..medium (80 mels): knf + та же нормализация, что в sherpa-пайплайне.
-    """
-    if n_mels == 128:
-        if openai_whisper is None:
-            raise RuntimeError(
-                "openai-whisper required for 128-mel (turbo). pip install openai-whisper"
-            )
-        audio = openai_whisper.pad_or_trim(torch.from_numpy(samples))
-        mel = openai_whisper.log_mel_spectrogram(audio, n_mels=128)
-        # [128, 3000]
-        return mel.unsqueeze(0).detach().cpu().numpy().astype(np.float32)
-
-    features = []
-    opts = knf.WhisperFeatureOptions()
-    opts.dim = n_mels
-    online_whisper_fbank = knf.OnlineWhisperFbank(opts)
-    online_whisper_fbank.accept_waveform(16000, samples)
-    online_whisper_fbank.input_finished()
-    for i in range(online_whisper_fbank.num_frames_ready):
-        f = online_whisper_fbank.get_frame(i)
-        features.append(torch.from_numpy(f))
-
-    features = torch.stack(features)
-    log_spec = torch.clamp(features, min=1e-10).log10()
-    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
-    mel = (log_spec + 4.0) / 4.0
-    mel = torch.nn.functional.pad(mel, (0, 0, 0, 1500), "constant", 0)
-
-    target = target_frames
-    if mel.shape[0] > target:
-        mel = mel[: target - 50]
-        mel = torch.nn.functional.pad(mel, (0, 0, 0, 50), "constant", 0)
-    elif mel.shape[0] < target:
-        mel = torch.nn.functional.pad(
-            mel, (0, 0, 0, target - mel.shape[0]), "constant", 0
-        )
-
-    return mel.t().unsqueeze(0)
 
 
 def load_tokens(filename):
@@ -293,11 +240,7 @@ class RKNNModel:
         self.decoder.release()
 
     def run_encoder(self, x):
-        if isinstance(x, torch.Tensor):
-            arr = x.detach().cpu().numpy()
-        else:
-            arr = np.asarray(x)
-        arr = np.ascontiguousarray(arr, dtype=np.float32)
+        arr = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
         return self.encoder.inference(inputs=[arr])
 
     def get_self_cache(self) -> List[np.ndarray]:
@@ -571,21 +514,7 @@ def _infer_model_size_key(encoder_path: str, profile: Optional[str]) -> str:
 
 def _language_token_id(lang: str) -> int:
     """Whisper multilingual language token (e.g. ru -> 50263)."""
-    code = (lang or "ru").strip().lower()
-    if openai_whisper is None:
-        # Fallback for common codes when openai-whisper is not installed
-        fallback = {"en": 50259, "ru": 50263, "uk": 50276, "de": 50261, "es": 50262}
-        if code not in fallback:
-            raise ValueError(
-                f"WHISPER_LANGUAGE={code!r} needs openai-whisper, or one of: "
-                f"{', '.join(sorted(fallback))}"
-            )
-        return fallback[code]
-    tokenizer = openai_whisper.tokenizer.get_tokenizer(True)
-    try:
-        return int(tokenizer.to_language_token(code))
-    except KeyError as e:
-        raise ValueError(f"Unknown WHISPER_LANGUAGE={code!r}") from e
+    return language_token_id(lang)
 
 
 def model_config_from_encoder_path(
