@@ -33,27 +33,10 @@ jobs:
           echo "RUNNER_UID=$(id -u)" >> $GITHUB_ENV
           echo "RUNNER_GID=$(id -g)" >> $GITHUB_ENV
 
-      # GHA cache needs docker-container driver (pulls moby/buildkit from Docker Hub).
-      # Retry on Hub timeouts; if both fail — fallback to docker driver (tests still run, no cache-to).
       - name: Set up Docker Buildx
-        id: buildx
         uses: docker/setup-buildx-action@v3
-        continue-on-error: true
 
-      - name: Set up Docker Buildx (retry)
-        id: buildx_retry
-        if: steps.buildx.outcome == 'failure'
-        uses: docker/setup-buildx-action@v3
-        continue-on-error: true
-
-      - name: Set up Docker Buildx (fallback without cache export)
-        if: steps.buildx.outcome == 'failure' && steps.buildx_retry.outcome == 'failure'
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
-
-      - name: Build dev image (with GHA cache)
-        if: steps.buildx.outcome == 'success' || steps.buildx_retry.outcome == 'success'
+      - name: Build dev image
         uses: docker/build-push-action@v6
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false
@@ -65,19 +48,6 @@ jobs:
           push: false
           cache-from: type=gha,scope=whisper-rknn-dev
           cache-to: type=gha,mode=max,scope=whisper-rknn-dev
-
-      - name: Build dev image (fallback, no cache export)
-        if: steps.buildx.outcome == 'failure' && steps.buildx_retry.outcome == 'failure'
-        uses: docker/build-push-action@v6
-        env:
-          DOCKER_BUILD_RECORD_UPLOAD: false
-        with:
-          context: .
-          file: ./Dockerfile.dev
-          tags: whisper-rknn-dev:latest
-          load: true
-          push: false
-          cache-from: type=gha,scope=whisper-rknn-dev
 
       - name: Lint with ruff
         run: |
