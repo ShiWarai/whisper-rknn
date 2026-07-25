@@ -70,7 +70,8 @@ Secrets репозитория (Settings → Secrets and variables → Actions):
 
 - Включены **GitHub Actions** и **Packages** (GHCR).
 - Для публичного образа: visibility пакета `whisper-rknn` → Public (при необходимости).
-- `third_party/` с `.whl` и `librknnrt.so` должен быть в git (для prod-сборки в CI).
+- `third_party/` с `.whl`, `librknnrt.so` и `ffmpeg-rockchip/` должен быть в git (для prod-сборки в CI).
+- Prod-образ ~400 MB (`linux/arm64`): slim Python, без PyTorch/openai-whisper.
 
 ## Self-hosted runner
 

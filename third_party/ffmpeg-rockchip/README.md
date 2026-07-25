@@ -5,7 +5,7 @@ Prebuilt binaries for RK3588 hardware decode (rkmpp/rkrga).
 | Field | Value |
 |-------|-------|
 | Upstream | [nyanmisaka/ffmpeg-rockchip](https://github.com/nyanmisaka/ffmpeg-rockchip) |
-| Build tree | `/root/dev/ffmpeg` (host) |
+| Build tree | См. [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm) `third_party/ffmpeg-rockchip/` |
 | Platform | linux/arm64 (RK3588) |
 
 ## Configure

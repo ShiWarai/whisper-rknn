@@ -29,8 +29,10 @@ Vendored из [video-descriptor-rkllm](https://github.com/ShiWarai/video-descrip
 
 ## Обновление
 
-Свежие пакеты: [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) → `rknpu2/runtime/Linux/.../librknnrt.so` и `rknn-toolkit-lite2/packages/*.whl`. Замените файлы здесь и путь к `.whl` в `Dockerfile`.
+**RKNN:** свежие пакеты — [rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2) → `rknpu2/runtime/Linux/.../librknnrt.so` и `rknn-toolkit-lite2/packages/*.whl`. Замените файлы здесь и путь к `.whl` в `Dockerfile`.
+
+**ffmpeg-rockchip:** скопируйте каталог `third_party/ffmpeg-rockchip/` из ветки `dev` репозитория [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm) (или пересоберите по [ffmpeg-rockchip/README.md](ffmpeg-rockchip/README.md)). После замены пересоберите образ.
 
 ## Лицензия и распространение
 
-Артефакты Rockchip RKNN SDK — по лицензии Rockchip. Код приложения в этом репозитории — MIT (см. корневой `LICENSE`).
+Артефакты Rockchip RKNN SDK — по лицензии Rockchip. ffmpeg-rockchip — GPL v3 (см. upstream [nyanmisaka/ffmpeg-rockchip](https://github.com/nyanmisaka/ffmpeg-rockchip)). Код приложения в этом репозитории — MIT (см. корневой `LICENSE`).
