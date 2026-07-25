@@ -14,9 +14,9 @@
 
 | Категория | Технологии |
 |-----------|------------|
-| Inference | RKNN Toolkit Lite 2, `librknnrt`, PyTorch (fbank) |
+| Inference | RKNN Toolkit Lite 2, `librknnrt`, kaldi_native_fbank |
 | API | FastAPI, Uvicorn |
-| Аудио | ffmpeg, soundfile, kaldi_native_fbank |
+| Аудио | ffmpeg-rockchip (MPP/RGA), soundfile, kaldi_native_fbank |
 | Инфраструктура | Docker, Docker Compose, GHCR |
 | CI | GitHub Actions, ruff, pytest |
 | Платформа | **linux/arm64** (RK3588 NPU) |
