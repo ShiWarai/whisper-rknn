@@ -8,7 +8,6 @@ import pytest
 from app.audio_features import N_SAMPLES, compute_features, pad_or_trim
 from app.decode import (
     _HAS_AV,
-    DecodeResult,
     TranscriptSegment,
     causal_mask_1d,
     iter_audio_chunks,
