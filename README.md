@@ -14,9 +14,9 @@
 
 | Категория | Технологии |
 |-----------|------------|
-| Inference | RKNN Toolkit Lite 2, `librknnrt`, PyTorch (fbank) |
+| Inference | RKNN Toolkit Lite 2, `librknnrt`, numpy mel (без PyTorch) |
 | API | FastAPI, Uvicorn |
-| Аудио | ffmpeg, soundfile, kaldi_native_fbank |
+| Аудио | ffmpeg-rockchip (MPP/RGA), soundfile, kaldi_native_fbank |
 | Инфраструктура | Docker, Docker Compose, GHCR |
 | CI | GitHub Actions, ruff, pytest |
 | Платформа | **linux/arm64** (RK3588 NPU) |
@@ -66,14 +66,16 @@
 
 ### Локальная сборка (RK3588)
 
-Требуется `third_party/` с `librknnrt.so` и wheel (уже в репозитории). См. [third_party/README.md](third_party/README.md).
+Требуется `third_party/` с `librknnrt.so`, wheel rknnlite и **ffmpeg-rockchip** (уже в репозитории). См. [third_party/README.md](third_party/README.md).
+
+На хосте нужны устройства MPP/RGA (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-Сервис: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются.
+Сервис: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**400 MB** (slim Python + vendored ffmpeg-rockchip, без PyTorch).
 
 ### Автозагрузка turbo
 
@@ -113,6 +115,8 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 |------|------------|
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
 | `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
+| `third_party/ffmpeg-rockchip/` | Vendored ffmpeg с rkmpp/rkrga для декода ogg/mp3/… |
+| `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
 | Каталог моделей на хосте | `encoder.rknn`, `decoder.rknn`, `tokens.txt` |
 
 Версия **`librknnrt.so`** должна совпадать с toolchain, которым собраны `.rknn`. Подробнее: [docs/models.md](docs/models.md).
@@ -150,12 +154,14 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
 | `WHISPER_LANGUAGE` | `ru` | Язык распознавания: код Whisper (`ru`, `en`, `uk`, …). **Обязательно** задать под ваше аудио — иначе turbo может «галлюцинировать» на английском |
 | `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2` (все), `all`, `auto` |
-| `WHISPER_MODELS_DIR` | — | Путь на хосте (для логов; volume в compose) |
+| `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
+| `FFMPEG_BIN` | из `PATH` | Бинарник ffmpeg (в образе — vendored ffmpeg-rockchip) |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
+| `WHISPER_MAX_NGRAM_REPEAT` | `6` | Остановка при зацикливании n-грамм в декодере |
 
 ---
 
@@ -164,9 +170,15 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 ```
 whisper-rknn/
 ├── app/
-│   ├── api_server.py      # FastAPI + uvicorn
-│   └── decode.py          # fbank → RKNN → текст
-├── third_party/           # RKNN SDK (wheel + librknnrt.so)
+│   ├── api_server.py         # FastAPI + uvicorn
+│   ├── decode.py             # RKNN encoder/decoder, chunking
+│   ├── audio_features.py     # mel-спектрограмма (numpy + knf)
+│   ├── whisper_languages.py  # language token ids без openai-whisper
+│   └── assets/
+│       └── mel_filters.npz   # Whisper mel filters (80/128)
+├── third_party/
+│   ├── librknnrt.so, rknn wheel
+│   └── ffmpeg-rockchip/      # rkmpp/rkrga (из video-descriptor-rkllm)
 ├── tests/
 ├── docs/
 │   ├── api.md
@@ -227,6 +239,6 @@ Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 
 MIT — см. [LICENSE](LICENSE).
 
-Код приложения — MIT. Бинарники Rockchip в `third_party/` — по условиям Rockchip RKNN SDK.
+Код приложения — MIT. Бинарники Rockchip в `third_party/` — по условиям Rockchip RKNN SDK. **ffmpeg-rockchip** — GPL v3 (upstream nyanmisaka/ffmpeg-rockchip).
 
 _Проект создан с использованием нейросетей._

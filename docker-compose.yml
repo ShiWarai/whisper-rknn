@@ -13,6 +13,11 @@ services:
     platform: linux/arm64
     container_name: whisper-rknn-api
     privileged: true
+    devices:
+      - /dev/mpp_service:/dev/mpp_service
+      - /dev/rga:/dev/rga
+      - /dev/dri:/dev/dri
+      - /dev/dma_heap:/dev/dma_heap
     restart: unless-stopped
     environment:
       WHISPER_DOWNLOAD_MODELS: ${WHISPER_DOWNLOAD_MODELS:-0}
@@ -26,7 +31,11 @@ services:
       WHISPER_TOKENS: /models/tokens.txt
       HOST: "0.0.0.0"
       PORT: ${PORT:-8080}
-      MAX_UPLOAD_MB: "25"
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-25}
+      WHISPER_CHUNK_SECONDS: ${WHISPER_CHUNK_SECONDS:-}
+      WHISPER_CHUNK_OVERLAP_SECONDS: ${WHISPER_CHUNK_OVERLAP_SECONDS:-5}
+      WHISPER_MAX_NGRAM_REPEAT: ${WHISPER_MAX_NGRAM_REPEAT:-6}
+      FFMPEG_BIN: ${FFMPEG_BIN:-}
     volumes:
       - ${WHISPER_MODELS_DIR}:/models
     networks:

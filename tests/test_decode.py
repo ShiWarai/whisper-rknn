@@ -1,10 +1,11 @@
-"""Unit tests for pure helpers in app.decode."""
+"""Unit tests for pure helpers in app.decode and app.audio_features."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
+from app.audio_features import N_SAMPLES, compute_features, pad_or_trim
 from app.decode import (
     causal_mask_1d,
     iter_audio_chunks,
@@ -13,6 +14,7 @@ from app.decode import (
     stitch_transcripts,
     whisper_window_samples,
 )
+from app.whisper_languages import language_token_id
 
 
 def test_resample_linear_same_rate():
@@ -110,3 +112,35 @@ def test_stitch_transcripts_dedupes_overlap():
     assert stitch_transcripts([left, right]) == (
         "привет проверка звука я хочу понять насколько тяжело склеить сообщения"
     )
+
+
+def test_pad_or_trim_short_pads():
+    x = np.zeros(1000, dtype=np.float32)
+    out = pad_or_trim(x)
+    assert out.shape == (N_SAMPLES,)
+    assert out[1000:].sum() == 0
+
+
+def test_pad_or_trim_long_trims():
+    x = np.ones(N_SAMPLES + 500, dtype=np.float32)
+    out = pad_or_trim(x)
+    assert out.shape == (N_SAMPLES,)
+
+
+def test_compute_features_turbo_shape():
+    samples = np.random.randn(16000 * 5).astype(np.float32)
+    mel = compute_features(samples, n_mels=128, target_frames=3000)
+    assert mel.shape == (1, 128, 3000)
+    assert mel.dtype == np.float32
+
+
+def test_compute_features_base_shape():
+    samples = np.random.randn(16000 * 5).astype(np.float32)
+    mel = compute_features(samples, n_mels=80, target_frames=3000)
+    assert mel.shape == (1, 80, 3000)
+    assert mel.dtype == np.float32
+
+
+def test_language_token_id_ru_en():
+    assert language_token_id("ru") == 50263
+    assert language_token_id("en") == 50259
