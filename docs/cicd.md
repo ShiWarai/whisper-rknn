@@ -31,7 +31,7 @@ git push origin dev
 
 Сборка prerelease использует **GHA cache** BuildKit (`cache-from` / `cache-to`, scope `whisper-rknn-prerelease`) — повторные сборки быстрее, пока не меняются слои `Dockerfile` / `requirements.txt`.
 
-Job **test** (dev-образ `Dockerfile.dev`) — тот же механизм, scope `whisper-rknn-dev` (pip-слои кэшируются между push в `main` / `dev`). Для cache-to нужен Buildx driver `docker-container` (скачивает `moby/buildkit` с Docker Hub); при таймауте Hub setup ретраится, затем fallback на `driver: docker` без записи кэша — тесты всё равно идут.
+Job **test** (dev-образ `Dockerfile.dev`) — тот же механизм, scope `whisper-rknn-dev` (pip-слои кэшируются между push в `main` / `dev`).
 
 Workflow **Publish** (`:main`) — scope `whisper-rknn-main`.
 
