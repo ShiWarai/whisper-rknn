@@ -48,7 +48,7 @@
 
    ```bash
    cp .env.example .env
-   # WHISPER_MODELS_DIR и WHISPER_DOWNLOAD_MODELS=turbo — см. .env.example
+   # WHISPER_MODELS_DIR, WHISPER_LANGUAGE=ru, PORT=9003 — см. .env.example
    ```
 
 3. Соберите и запустите:
@@ -58,7 +58,7 @@
    docker compose up -d
    ```
 
-Другие контейнеры (например Telegram-бот) подключайте к `whisper_rknn_default` и обращайтесь к **`whisper-rknn-api:8080`**.
+Другие контейнеры (например Telegram-бот) подключайте к `whisper_rknn_default` и обращайтесь к **`whisper-rknn-api:${PORT}`** (у нас в `.env` — `9003`).
 
 ---
 
@@ -83,6 +83,7 @@ docker compose up -d
 # в .env
 WHISPER_DOWNLOAD_MODELS=turbo
 WHISPER_MODEL_PROFILE=turbo
+WHISPER_LANGUAGE=ru
 WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
 ```
 
@@ -111,7 +112,7 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 | Путь | Назначение |
 |------|------------|
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
-| `third_party/rknn_toolkit_lite2-2.1.0-cp310-cp310-linux_aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
+| `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
 | Каталог моделей на хосте | `encoder.rknn`, `decoder.rknn`, `tokens.txt` |
 
 Версия **`librknnrt.so`** должна совпадать с toolchain, которым собраны `.rknn`. Подробнее: [docs/models.md](docs/models.md).
@@ -130,8 +131,10 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 ```bash
 docker run --rm --network whisper_rknn_default curlimages/curl:latest \
   -s -F "file=@/path/to/voice.ogg" \
-  http://whisper-rknn-api:8080/transcribe
+  http://whisper-rknn-api:9003/transcribe
 ```
+
+(порт задаётся через `PORT` в `.env`; по умолчанию в образе — `8080`)
 
 Полное описание: [docs/api.md](docs/api.md).
 
@@ -145,10 +148,14 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
+| `WHISPER_LANGUAGE` | `ru` | Язык распознавания: код Whisper (`ru`, `en`, `uk`, …). **Обязательно** задать под ваше аудио — иначе turbo может «галлюцинировать» на английском |
+| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2` (все), `all`, `auto` |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (для логов; volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
-| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера |
+| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
+| `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
+| `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
 
 ---
 
@@ -212,7 +219,7 @@ Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 
 ### Интеграция с ботом
 
-В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:8080` (или порт из override в compose).
+В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:9003` (порт из `.env` whisper-rknn). Язык распознавания настраивается в `.env` whisper-rknn: **`WHISPER_LANGUAGE=ru`** (или `en`, `uk`, …).
 
 ---
 

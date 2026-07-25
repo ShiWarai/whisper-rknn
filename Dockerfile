@@ -1,6 +1,6 @@
 # Whisper RKNN HTTP API — build on linux/arm64 (RK3588) with NPU.
-# Before build: third_party/rknn_toolkit_lite2-2.1.0-cp310-cp310-linux_aarch64.whl + third_party/librknnrt.so
-# (same major version as your .rknn models).
+# Before build: third_party/rknn_toolkit_lite2-2.3.2-*-aarch64.whl + third_party/librknnrt.so
+# (same version as your .rknn models; currently 2.3.2 from airockchip/rknn-toolkit2).
 
 FROM python:3.10-slim-bookworm
 
@@ -21,7 +21,7 @@ RUN pip install --no-cache-dir -U pip wheel \
 COPY third_party/ /tmp/rknn_bundle/
 
 RUN set -e; \
-    pip install --no-cache-dir /tmp/rknn_bundle/rknn_toolkit_lite2-2.1.0-cp310-cp310-linux_aarch64.whl; \
+    pip install --no-cache-dir /tmp/rknn_bundle/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl; \
     cp /tmp/rknn_bundle/librknnrt.so /usr/lib/librknnrt.so; \
     python -c "import rknnlite"; \
     rm -rf /tmp/rknn_bundle

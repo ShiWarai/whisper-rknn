@@ -206,18 +206,53 @@ def load_tokens(filename):
     return tokens
 
 
-def init_model(filename, target_platform="rk3588"):
+def resolve_npu_core_mask(name: Optional[str] = None) -> int:
+    """
+    Map WHISPER_NPU_CORE_MASK to RKNNLite constants.
+    Default: NPU_CORE_0_1_2 (all three cores on RK3588).
+    """
+    raw = (name if name is not None else os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2")).strip()
+    aliases = {
+        "0": "NPU_CORE_0",
+        "1": "NPU_CORE_1",
+        "2": "NPU_CORE_2",
+        "0_1": "NPU_CORE_0_1",
+        "0_1_2": "NPU_CORE_0_1_2",
+        "all": "NPU_CORE_ALL",
+        "auto": "NPU_CORE_AUTO",
+        "NPU_CORE_0": "NPU_CORE_0",
+        "NPU_CORE_1": "NPU_CORE_1",
+        "NPU_CORE_2": "NPU_CORE_2",
+        "NPU_CORE_0_1": "NPU_CORE_0_1",
+        "NPU_CORE_0_1_2": "NPU_CORE_0_1_2",
+        "NPU_CORE_ALL": "NPU_CORE_ALL",
+        "NPU_CORE_AUTO": "NPU_CORE_AUTO",
+    }
+    key = aliases.get(raw, aliases.get(raw.upper()))
+    if key is None:
+        raise ValueError(
+            f"Unknown WHISPER_NPU_CORE_MASK={raw!r}; use 0, 0_1, 0_1_2, all, auto"
+        )
+    return int(getattr(RKNNLite, key))
+
+
+def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = None):
     if not Path(filename).is_file():
         raise FileNotFoundError(f"{filename} does not exist")
+
+    if core_mask is None:
+        core_mask = resolve_npu_core_mask()
 
     rknn_lite = RKNNLite(verbose=False)
     ret = rknn_lite.load_rknn(path=filename)
     if ret != 0:
         raise RuntimeError(f"Load model {filename} failed!")
 
-    ret = rknn_lite.init_runtime(core_mask=RKNNLite.NPU_CORE_0)
+    ret = rknn_lite.init_runtime(core_mask=core_mask)
     if ret != 0:
-        raise RuntimeError(f"Failed to init rknn runtime for {filename}")
+        raise RuntimeError(
+            f"Failed to init rknn runtime for {filename} (core_mask={core_mask})"
+        )
     return rknn_lite
 
 
@@ -244,12 +279,14 @@ class RKNNModel:
         self.n_mels = n_mels
         self.mel_time_frames = mel_time_frames
 
+        core_mask = resolve_npu_core_mask()
         if verbose:
             print("sot_sequence", self.sot_sequence)
             print("eot", self.eot)
+            print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
 
-        self.encoder = init_model(encoder)
-        self.decoder = init_model(decoder)
+        self.encoder = init_model(encoder, core_mask=core_mask)
+        self.decoder = init_model(decoder, core_mask=core_mask)
 
     def release(self):
         self.encoder.release()
@@ -282,13 +319,99 @@ class RKNNModel:
         )
 
 
-def decode_utterance(
-    model: RKNNModel, id2token: dict, wav_16k_path: str, verbose: bool = True
-) -> str:
-    samples, sample_rate = load_audio_wav(wav_16k_path)
-    if sample_rate != 16000:
-        samples = resample_linear(samples, sample_rate, 16000)
+def whisper_window_samples(sample_rate: int = 16000, mel_time_frames: int = 3000) -> int:
+    """Samples per model window (~30 s for mel_time_frames=3000 @ 100 frames/s)."""
+    seconds = float(mel_time_frames) / 100.0
+    return max(1, int(round(seconds * sample_rate)))
 
+
+def iter_audio_chunks(
+    samples: np.ndarray,
+    chunk_samples: int,
+    overlap_samples: int = 0,
+) -> List[np.ndarray]:
+    """
+    Sliding windows of length ``chunk_samples`` (RKNN mel window, e.g. 30 s / 3000 frames).
+
+    ``overlap_samples`` advances the window by ``chunk_samples - overlap`` so the
+    model input stays ≤3000 frames while neighbouring chunks share audio.
+    The last window may be shorter (feature pad / pad_or_trim fills the rest).
+    """
+    n = int(samples.shape[0])
+    if n <= 0:
+        return [samples]
+    if n <= chunk_samples:
+        return [samples]
+
+    overlap_samples = int(max(0, min(overlap_samples, chunk_samples - 1)))
+    hop = chunk_samples - overlap_samples
+    chunks: List[np.ndarray] = []
+    start = 0
+    while start < n:
+        end = min(start + chunk_samples, n)
+        chunks.append(samples[start:end])
+        if end >= n:
+            break
+        start += hop
+        # Snap final window to the end so a tiny tail is not a near-duplicate hop.
+        if start < n and start + chunk_samples >= n and n - start < hop:
+            final_start = max(0, n - chunk_samples)
+            if final_start > start:
+                start = final_start
+            # else next loop takes start:n (short tail) — fine
+    return chunks
+
+
+def stitch_transcripts(parts: List[str]) -> str:
+    """Join chunk texts; drop duplicated overlap (longest word suffix/prefix match)."""
+    cleaned = [p.strip() for p in parts if p and p.strip()]
+    if not cleaned:
+        return ""
+    out = cleaned[0]
+    for nxt in cleaned[1:]:
+        out = _merge_overlap_text(out, nxt)
+    return out.strip()
+
+
+def _merge_overlap_text(left: str, right: str) -> str:
+    """Append ``right`` to ``left``, removing the longest shared word boundary."""
+    lw = left.split()
+    rw = right.split()
+    if not lw:
+        return right
+    if not rw:
+        return left
+
+    max_k = min(len(lw), len(rw), 48)
+
+    def _norm(w: str) -> str:
+        return w.lower().strip(".,!?;:«»\"'()[]")
+
+    best = 0
+    for k in range(max_k, 0, -1):
+        if [_norm(x) for x in lw[-k:]] == [_norm(x) for x in rw[:k]]:
+            best = k
+            break
+    if best:
+        return " ".join(lw + rw[best:])
+    return left + " " + right
+
+
+def _tokens_to_text(ans: List[int], id2token: dict) -> str:
+    pieces = []
+    for i in ans:
+        if i in id2token:
+            pieces.append(base64.b64decode(id2token[i]))
+    return b"".join(pieces).decode().strip()
+
+
+def decode_samples(
+    model: RKNNModel,
+    id2token: dict,
+    samples: np.ndarray,
+    verbose: bool = True,
+) -> str:
+    """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
     features = compute_features(
         samples,
         n_mels=model.n_mels,
@@ -300,6 +423,7 @@ def decode_utterance(
     self_kv = model.get_self_cache()
 
     offset = np.array([0], dtype=np.int32)
+    out = None
     for t in model.sot_sequence:
         token = np.array([[t]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
@@ -310,12 +434,37 @@ def decode_utterance(
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
 
+    assert out is not None
     idx = out[0][0, 0].argmax()
-    eot = model.eot
-    ans = []
+    ans: List[int] = []
+    max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
 
-    while idx != eot and offset.item() < 100:
-        ans.append(idx)
+    def _repeating_tail(tokens: List[int]) -> bool:
+        """Stop if the same 1–4 token pattern repeats at the end."""
+        for n in (1, 2, 3, 4):
+            need = n * max_ngram_repeats
+            if len(tokens) < need:
+                continue
+            pattern = tokens[-n:]
+            ok = True
+            for r in range(1, max_ngram_repeats):
+                start = len(tokens) - (r + 1) * n
+                if tokens[start : start + n] != pattern:
+                    ok = False
+                    break
+            if ok:
+                return True
+        return False
+
+    while idx != model.eot and offset.item() < 100:
+        ans.append(int(idx))
+        if _repeating_tail(ans):
+            for n in (1, 2, 3, 4):
+                need = n * max_ngram_repeats
+                if len(ans) >= need and ans[-n:] * max_ngram_repeats == ans[-need:]:
+                    ans = ans[: len(ans) - n * (max_ngram_repeats - 1)]
+                    break
+            break
         token = np.array([[idx]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
         out = model.run_decoder(
@@ -328,12 +477,72 @@ def decode_utterance(
 
     if verbose:
         print(ans)
-    pieces = []
-    for i in ans:
-        if i in id2token:
-            pieces.append(base64.b64decode(id2token[i]))
-    text = b"".join(pieces).decode().strip()
+    text = _tokens_to_text(ans, id2token)
     if verbose:
+        print(text)
+    return text
+
+
+def decode_utterance(
+    model: RKNNModel, id2token: dict, wav_16k_path: str, verbose: bool = True
+) -> str:
+    """
+    Full utterance: if longer than the model window (~30 s / 3000 mel), split into
+    sliding chunks of that window size (optional overlap), decode each, stitch text.
+    """
+    samples, sample_rate = load_audio_wav(wav_16k_path)
+    if sample_rate != 16000:
+        samples = resample_linear(samples, sample_rate, 16000)
+        sample_rate = 16000
+
+    # Hard cap: never feed more samples than the static RKNN window (3000 mel ≈ 30 s).
+    chunk_samples = whisper_window_samples(sample_rate, model.mel_time_frames)
+    env_sec = os.environ.get("WHISPER_CHUNK_SECONDS", "").strip()
+    if env_sec:
+        try:
+            sec = float(env_sec)
+            if sec > 0:
+                chunk_samples = min(
+                    chunk_samples, max(1, int(round(sec * sample_rate)))
+                )
+        except ValueError:
+            pass
+
+    # Overlap must stay inside the window so each encode still sees ≤3000 frames.
+    overlap_samples = 0
+    env_ov = os.environ.get("WHISPER_CHUNK_OVERLAP_SECONDS", "5").strip()
+    if env_ov:
+        try:
+            ov_sec = float(env_ov)
+            if ov_sec > 0:
+                overlap_samples = min(
+                    chunk_samples - 1,
+                    max(0, int(round(ov_sec * sample_rate))),
+                )
+        except ValueError:
+            pass
+
+    chunks = iter_audio_chunks(
+        samples, chunk_samples, overlap_samples=overlap_samples
+    )
+    if verbose or len(chunks) > 1:
+        dur_s = len(samples) / float(sample_rate)
+        print(
+            f"audio_chunks={len(chunks)} duration_s={dur_s:.2f} "
+            f"window_s={chunk_samples / sample_rate:.2f} "
+            f"overlap_s={overlap_samples / sample_rate:.2f}"
+        )
+
+    parts: List[str] = []
+    for i, chunk in enumerate(chunks):
+        if verbose and len(chunks) > 1:
+            print(f"chunk {i + 1}/{len(chunks)} samples={len(chunk)}")
+        part = decode_samples(model, id2token, chunk, verbose=verbose)
+        if part:
+            parts.append(part)
+
+    text = stitch_transcripts(parts)
+    if verbose and len(chunks) > 1:
         print(text)
     return text
 
@@ -360,6 +569,25 @@ def _infer_model_size_key(encoder_path: str, profile: Optional[str]) -> str:
     )
 
 
+def _language_token_id(lang: str) -> int:
+    """Whisper multilingual language token (e.g. ru -> 50263)."""
+    code = (lang or "ru").strip().lower()
+    if openai_whisper is None:
+        # Fallback for common codes when openai-whisper is not installed
+        fallback = {"en": 50259, "ru": 50263, "uk": 50276, "de": 50261, "es": 50262}
+        if code not in fallback:
+            raise ValueError(
+                f"WHISPER_LANGUAGE={code!r} needs openai-whisper, or one of: "
+                f"{', '.join(sorted(fallback))}"
+            )
+        return fallback[code]
+    tokenizer = openai_whisper.tokenizer.get_tokenizer(True)
+    try:
+        return int(tokenizer.to_language_token(code))
+    except KeyError as e:
+        raise ValueError(f"Unknown WHISPER_LANGUAGE={code!r}") from e
+
+
 def model_config_from_encoder_path(
     encoder_path: str,
     profile: Optional[str] = None,
@@ -367,6 +595,7 @@ def model_config_from_encoder_path(
     """Return decoder hyperparams + mel shape for a given encoder .rknn path."""
     prof_env = os.environ.get("WHISPER_MODEL_PROFILE") or os.environ.get("WHISPER_VARIANT")
     size_key = _infer_model_size_key(encoder_path, profile if profile is not None else prof_env)
+    lang = os.environ.get("WHISPER_LANGUAGE", "ru")
 
     enc = encoder_path
     if ".en" in enc:
@@ -374,12 +603,15 @@ def model_config_from_encoder_path(
         eot = 50256
         n_mels, mel_time_frames = 80, 3000
     elif size_key == "turbo":
-        # OpenAI large-v3-turbo: multilingual, sot + lang + transcribe + no_timestamps
-        sot_sequence = [50258, 50259, 50360, 50364]
+        # large-v3 / turbo: vocab with 100 languages → transcribe=50360, notimestamps=50364
+        lang_id = _language_token_id(lang)
+        sot_sequence = [50258, lang_id, 50360, 50364]
         eot = 50257
         n_mels, mel_time_frames = 128, 3000
     else:
-        sot_sequence = [50258, 50259, 50359, 50363]
+        # tiny..medium multilingual (99 langs): transcribe=50359, notimestamps=50363
+        lang_id = _language_token_id(lang)
+        sot_sequence = [50258, lang_id, 50359, 50363]
         eot = 50257
         n_mels, mel_time_frames = 80, 3000
 

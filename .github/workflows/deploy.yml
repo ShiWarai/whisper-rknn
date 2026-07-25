@@ -14,6 +14,7 @@ on:
 permissions:
   contents: read
   packages: write
+  actions: write
 
 env:
   IMAGE_NAME: ghcr.io/shiwarai/whisper-rknn
@@ -94,6 +95,8 @@ jobs:
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
           push: true
           provenance: false
+          cache-from: type=gha,scope=whisper-rknn-prerelease
+          cache-to: type=gha,mode=max,scope=whisper-rknn-prerelease
 
   notify-telegram:
     name: Notify Telegram
