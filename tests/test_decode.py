@@ -8,10 +8,13 @@ import pytest
 from app.audio_features import N_SAMPLES, compute_features, pad_or_trim
 from app.decode import (
     _HAS_AV,
+    DecodeResult,
+    TranscriptSegment,
     causal_mask_1d,
     iter_audio_chunks,
     load_audio_16k_mono,
     model_config_from_encoder_path,
+    parse_timestamp_tokens,
     resample_linear,
     stitch_transcripts,
     whisper_window_samples,
@@ -42,7 +45,7 @@ def test_model_config_base_from_path(monkeypatch):
     monkeypatch.delenv("WHISPER_VARIANT", raising=False)
     monkeypatch.setenv("WHISPER_LANGUAGE", "en")
     cfg = model_config_from_encoder_path("/models/base-encoder.rknn")
-    sot, eot, n_layer, n_ctx, n_state, n_mels, mel_frames = cfg
+    sot, eot, n_layer, n_ctx, n_state, n_mels, mel_frames, no_ts, ts_begin = cfg
     assert sot == [50258, 50259, 50359, 50363]
     assert eot == 50257
     assert n_layer == 6
@@ -50,18 +53,22 @@ def test_model_config_base_from_path(monkeypatch):
     assert n_state == 512
     assert n_mels == 80
     assert mel_frames == 3000
+    assert no_ts == 50363
+    assert ts_begin == 50364
 
 
 def test_model_config_turbo_profile(monkeypatch):
     monkeypatch.setenv("WHISPER_MODEL_PROFILE", "turbo")
     monkeypatch.setenv("WHISPER_LANGUAGE", "ru")
     cfg = model_config_from_encoder_path("/models/encoder.rknn")
-    sot, eot, n_layer, _, n_state, n_mels, _ = cfg
+    sot, eot, n_layer, _, n_state, n_mels, _, no_ts, ts_begin = cfg
     assert sot == [50258, 50263, 50360, 50364]  # ru + turbo specials
     assert eot == 50257
     assert n_layer == 4
     assert n_state == 1280
     assert n_mels == 128
+    assert no_ts == 50364
+    assert ts_begin == 50365
 
 
 def test_model_config_invalid_profile():
@@ -146,6 +153,25 @@ def test_compute_features_base_shape():
 def test_language_token_id_ru_en():
     assert language_token_id("ru") == 50263
     assert language_token_id("en") == 50259
+
+
+def test_parse_timestamp_tokens_segments():
+    # Fake vocab: ids 10/11 are text tokens (base64 of utf-8)
+    import base64
+
+    id2token = {
+        10: base64.b64encode("hello".encode()).decode(),
+        11: base64.b64encode(" world".encode()).decode(),
+        12: base64.b64encode(" bye".encode()).decode(),
+    }
+    ts0 = 50365  # turbo timestamp_begin
+    # <|0.00|> hello world <|1.00|><|1.00|> bye <|2.00|>
+    tokens = [ts0 + 0, 10, 11, ts0 + 50, ts0 + 50, 12, ts0 + 100]
+    text, segments = parse_timestamp_tokens(tokens, id2token, ts0, time_offset=10.0)
+    assert text == "hello world bye"
+    assert len(segments) == 2
+    assert segments[0] == TranscriptSegment(start=10.0, end=11.0, text="hello world")
+    assert segments[1] == TranscriptSegment(start=11.0, end=12.0, text="bye")
 
 
 def _write_test_wav(path: str, sample_rate: int = 48000, duration_s: float = 0.1) -> None:

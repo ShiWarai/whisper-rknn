@@ -128,7 +128,7 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/health` | `{ "status": "ok" }` или `"loading"` (без авторизации) |
-| POST | `/transcribe` | `multipart/form-data`, поле `file` → `{ "text", "elapsed_s" }` |
+| POST | `/transcribe` | `multipart`: `file` (+ опц. `timestamps=true`) → `{ "text", "elapsed_s", "segments?" }` |
 
 При заданном `WHISPER_API_KEY` / `OPENAI_API_KEY`: заголовок `Authorization: Bearer <key>` (как у OpenAI API).
 

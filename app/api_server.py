@@ -9,10 +9,10 @@ import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import uvicorn
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.auth import require_api_key
@@ -49,9 +49,16 @@ def _restore_std_log_levels() -> None:
 _restore_std_log_levels()
 
 
+class TranscriptSegmentOut(BaseModel):
+    start: float
+    end: float
+    text: str
+
+
 class TranscribeResponse(BaseModel):
     text: str
     elapsed_s: float
+    segments: Optional[List[TranscriptSegmentOut]] = None
 
 
 _encoder_path = os.environ.get("WHISPER_ENCODER", "")
@@ -98,6 +105,8 @@ def _load_model_sync() -> None:
         n_text_state,
         n_mels,
         mel_time_frames,
+        notimestamps_id,
+        timestamp_begin,
     ) = model_config_from_encoder_path(_encoder_path)
     _id2token = load_tokens(_tokens_path)
     _model = RKNNModel(
@@ -110,6 +119,8 @@ def _load_model_sync() -> None:
         n_text_state=n_text_state,
         n_mels=n_mels,
         mel_time_frames=mel_time_frames,
+        notimestamps_id=notimestamps_id,
+        timestamp_begin=timestamp_begin,
         verbose=False,
     )
     from app.auth import auth_enabled
@@ -141,7 +152,13 @@ async def health():
 
 
 @app.post("/transcribe", response_model=TranscribeResponse, dependencies=[Depends(require_api_key)])
-async def transcribe(file: UploadFile = File(...)):
+async def transcribe(
+    file: UploadFile = File(...),
+    timestamps: bool = Form(
+        False,
+        description="If true, return segment start/end times for LLM/video alignment",
+    ),
+):
     if _model is None or _id2token is None:
         raise HTTPException(status_code=503, detail="Model not ready")
 
@@ -181,18 +198,35 @@ async def transcribe(file: UploadFile = File(...)):
                 format_hint=suffix,
                 cache_dir=cache_dir,
             )
-            text = decode_utterance(_model, _id2token, samples, verbose=False)
+            result = decode_utterance(
+                _model,
+                _id2token,
+                samples,
+                verbose=False,
+                timestamps=timestamps,
+            )
             elapsed = time.time() - t0
-            return text, elapsed
+            return result, elapsed
 
         try:
-            text, elapsed = await loop.run_in_executor(None, _run)
+            result, elapsed = await loop.run_in_executor(None, _run)
         except FileNotFoundError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
-    return TranscribeResponse(text=text, elapsed_s=round(elapsed, 3))
+    segments_out = None
+    if result.segments is not None:
+        segments_out = [
+            TranscriptSegmentOut(start=s.start, end=s.end, text=s.text)
+            for s in result.segments
+        ]
+
+    return TranscribeResponse(
+        text=result.text,
+        elapsed_s=round(elapsed, 3),
+        segments=segments_out,
+    )
 
 
 def main():

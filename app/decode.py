@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, List, Optional, Tuple, Union
 
@@ -24,6 +25,21 @@ import soundfile as sf
 
 from app.audio_features import compute_features
 from app.whisper_languages import language_token_id
+
+
+@dataclass
+class TranscriptSegment:
+    """Timed transcript span (seconds from start of utterance)."""
+
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class DecodeResult:
+    text: str
+    segments: Optional[List[TranscriptSegment]] = None
 
 try:
     import av
@@ -391,6 +407,8 @@ class RKNNModel:
         n_text_state: int,
         n_mels: int = 80,
         mel_time_frames: int = 3000,
+        notimestamps_id: Optional[int] = None,
+        timestamp_begin: Optional[int] = None,
         target_platform="rk3588",
         verbose: bool = True,
     ):
@@ -401,15 +419,30 @@ class RKNNModel:
         self.n_text_state = n_text_state
         self.n_mels = n_mels
         self.mel_time_frames = mel_time_frames
+        self.notimestamps_id = notimestamps_id
+        self.timestamp_begin = timestamp_begin
 
         core_mask = resolve_npu_core_mask()
         if verbose:
             print("sot_sequence", self.sot_sequence)
             print("eot", self.eot)
+            print("timestamp_begin", self.timestamp_begin)
             print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
 
         self.encoder = init_model(encoder, core_mask=core_mask)
         self.decoder = init_model(decoder, core_mask=core_mask)
+
+    def sot_sequence_for(self, timestamps: bool) -> List[int]:
+        """Prompt tokens; drop <|notimestamps|> when segment timestamps are requested."""
+        seq = list(self.sot_sequence)
+        if (
+            timestamps
+            and self.notimestamps_id is not None
+            and seq
+            and seq[-1] == self.notimestamps_id
+        ):
+            return seq[:-1]
+        return seq
 
     def release(self):
         self.encoder.release()
@@ -444,31 +477,31 @@ def whisper_window_samples(sample_rate: int = 16000, mel_time_frames: int = 3000
     return max(1, int(round(seconds * sample_rate)))
 
 
-def iter_audio_chunks(
+def iter_audio_chunk_spans(
     samples: np.ndarray,
     chunk_samples: int,
     overlap_samples: int = 0,
-) -> List[np.ndarray]:
+) -> List[Tuple[int, np.ndarray]]:
     """
     Sliding windows of length ``chunk_samples`` (RKNN mel window, e.g. 30 s / 3000 frames).
 
-    ``overlap_samples`` advances the window by ``chunk_samples - overlap`` so the
-    model input stays ≤3000 frames while neighbouring chunks share audio.
+    Returns ``(start_sample, chunk)`` so absolute timestamps can be recovered.
+    ``overlap_samples`` advances the window by ``chunk_samples - overlap``.
     The last window may be shorter (feature pad / pad_or_trim fills the rest).
     """
     n = int(samples.shape[0])
     if n <= 0:
-        return [samples]
+        return [(0, samples)]
     if n <= chunk_samples:
-        return [samples]
+        return [(0, samples)]
 
     overlap_samples = int(max(0, min(overlap_samples, chunk_samples - 1)))
     hop = chunk_samples - overlap_samples
-    chunks: List[np.ndarray] = []
+    spans: List[Tuple[int, np.ndarray]] = []
     start = 0
     while start < n:
         end = min(start + chunk_samples, n)
-        chunks.append(samples[start:end])
+        spans.append((start, samples[start:end]))
         if end >= n:
             break
         start += hop
@@ -477,8 +510,16 @@ def iter_audio_chunks(
             final_start = max(0, n - chunk_samples)
             if final_start > start:
                 start = final_start
-            # else next loop takes start:n (short tail) — fine
-    return chunks
+    return spans
+
+
+def iter_audio_chunks(
+    samples: np.ndarray,
+    chunk_samples: int,
+    overlap_samples: int = 0,
+) -> List[np.ndarray]:
+    """Sliding windows of length ``chunk_samples`` (see :func:`iter_audio_chunk_spans`)."""
+    return [chunk for _, chunk in iter_audio_chunk_spans(samples, chunk_samples, overlap_samples)]
 
 
 def stitch_transcripts(parts: List[str]) -> str:
@@ -524,12 +565,79 @@ def _tokens_to_text(ans: List[int], id2token: dict) -> str:
     return b"".join(pieces).decode().strip()
 
 
+def parse_timestamp_tokens(
+    token_ids: List[int],
+    id2token: dict,
+    timestamp_begin: int,
+    *,
+    time_offset: float = 0.0,
+) -> Tuple[str, List[TranscriptSegment]]:
+    """
+    Split Whisper decoder ids into segment spans.
+
+    Expected pattern: ``<|t0|> text… <|t1|>`` (optionally consecutive timestamps
+    for the next start). Id ``timestamp_begin + k`` → ``k * 0.02`` seconds.
+    """
+
+    def is_ts(tid: int) -> bool:
+        return tid >= timestamp_begin
+
+    def ts_sec(tid: int) -> float:
+        return (tid - timestamp_begin) * 0.02
+
+    segments: List[TranscriptSegment] = []
+    i = 0
+    n = len(token_ids)
+    while i < n:
+        if not is_ts(token_ids[i]):
+            i += 1
+            continue
+        start = ts_sec(token_ids[i])
+        i += 1
+        content: List[int] = []
+        while i < n and not is_ts(token_ids[i]):
+            content.append(token_ids[i])
+            i += 1
+        if i >= n:
+            text = _tokens_to_text(content, id2token)
+            if text:
+                abs_start = round(start + time_offset, 3)
+                segments.append(
+                    TranscriptSegment(start=abs_start, end=abs_start, text=text)
+                )
+            break
+        end = ts_sec(token_ids[i])
+        text = _tokens_to_text(content, id2token)
+        if text:
+            segments.append(
+                TranscriptSegment(
+                    start=round(start + time_offset, 3),
+                    end=round(end + time_offset, 3),
+                    text=text,
+                )
+            )
+        # Consecutive timestamp after end is the next segment start — keep it.
+        if i + 1 < n and is_ts(token_ids[i + 1]):
+            i += 1
+        else:
+            i += 1
+
+    full = " ".join(seg.text for seg in segments).strip()
+    if not full:
+        text_ids = [t for t in token_ids if t < timestamp_begin]
+        full = _tokens_to_text(text_ids, id2token)
+    return full, segments
+
+
 def decode_samples(
     model: RKNNModel,
     id2token: dict,
     samples: np.ndarray,
     verbose: bool = True,
-) -> str:
+    *,
+    timestamps: bool = False,
+    time_offset: float = 0.0,
+) -> DecodeResult:
     """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
     features = compute_features(
         samples,
@@ -541,9 +649,10 @@ def decode_samples(
     cross_kv = model.run_encoder(features)
     self_kv = model.get_self_cache()
 
+    sot = model.sot_sequence_for(timestamps)
     offset = np.array([0], dtype=np.int32)
     out = None
-    for t in model.sot_sequence:
+    for t in sot:
         token = np.array([[t]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
         out = model.run_decoder(
@@ -554,9 +663,16 @@ def decode_samples(
         offset += 1
 
     assert out is not None
-    idx = out[0][0, 0].argmax()
+    logits = np.asarray(out[0][0, 0], dtype=np.float32).copy()
+    # Force first emitted token to be a timestamp when timestamps are requested.
+    if timestamps and model.timestamp_begin is not None:
+        logits[: model.timestamp_begin] = -1e9
+    idx = int(logits.argmax())
     ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
+    max_tokens = int(
+        os.environ.get("WHISPER_MAX_DECODE_TOKENS", "150" if timestamps else "100")
+    )
 
     def _repeating_tail(tokens: List[int]) -> bool:
         """Stop if the same 1–4 token pattern repeats at the end."""
@@ -575,7 +691,7 @@ def decode_samples(
                 return True
         return False
 
-    while idx != model.eot and offset.item() < 100:
+    while idx != model.eot and offset.item() < max_tokens:
         ans.append(int(idx))
         if _repeating_tail(ans):
             for n in (1, 2, 3, 4):
@@ -592,14 +708,25 @@ def decode_samples(
         for i in range(1, len(out)):
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
-        idx = out[0][0, 0].argmax()
+        idx = int(out[0][0, 0].argmax())
 
     if verbose:
         print(ans)
-    text = _tokens_to_text(ans, id2token)
+
+    segments: Optional[List[TranscriptSegment]] = None
+    if timestamps and model.timestamp_begin is not None:
+        text, segments = parse_timestamp_tokens(
+            ans, id2token, model.timestamp_begin, time_offset=time_offset
+        )
+    else:
+        text_ids = ans
+        if model.timestamp_begin is not None:
+            text_ids = [t for t in ans if t < model.timestamp_begin]
+        text = _tokens_to_text(text_ids, id2token)
+
     if verbose:
         print(text)
-    return text
+    return DecodeResult(text=text, segments=segments)
 
 
 def decode_utterance(
@@ -607,12 +734,15 @@ def decode_utterance(
     id2token: dict,
     audio: Union[str, np.ndarray],
     verbose: bool = True,
-) -> str:
+    *,
+    timestamps: bool = False,
+) -> DecodeResult:
     """
     Full utterance: if longer than the model window (~30 s / 3000 mel), split into
     sliding chunks of that window size (optional overlap), decode each, stitch text.
 
     ``audio`` may be 16 kHz mono float32 samples or a path/bytes source for decoding.
+    When ``timestamps`` is True, returns segment spans for LLM/video alignment.
     """
     if isinstance(audio, np.ndarray):
         samples = np.ascontiguousarray(audio, dtype=np.float32)
@@ -647,29 +777,58 @@ def decode_utterance(
         except ValueError:
             pass
 
-    chunks = iter_audio_chunks(
+    spans = iter_audio_chunk_spans(
         samples, chunk_samples, overlap_samples=overlap_samples
     )
-    if verbose or len(chunks) > 1:
+    hop = chunk_samples - overlap_samples if overlap_samples else chunk_samples
+    if verbose or len(spans) > 1:
         dur_s = len(samples) / float(sample_rate)
         print(
-            f"audio_chunks={len(chunks)} duration_s={dur_s:.2f} "
+            f"audio_chunks={len(spans)} duration_s={dur_s:.2f} "
             f"window_s={chunk_samples / sample_rate:.2f} "
-            f"overlap_s={overlap_samples / sample_rate:.2f}"
+            f"overlap_s={overlap_samples / sample_rate:.2f} "
+            f"timestamps={timestamps}"
         )
 
     parts: List[str] = []
-    for i, chunk in enumerate(chunks):
-        if verbose and len(chunks) > 1:
-            print(f"chunk {i + 1}/{len(chunks)} samples={len(chunk)}")
-        part = decode_samples(model, id2token, chunk, verbose=verbose)
-        if part:
-            parts.append(part)
+    all_segments: List[TranscriptSegment] = []
+    for i, (start_sample, chunk) in enumerate(spans):
+        if verbose and len(spans) > 1:
+            print(
+                f"chunk {i + 1}/{len(spans)} samples={len(chunk)} start={start_sample}"
+            )
+        time_offset = start_sample / float(sample_rate)
+        result = decode_samples(
+            model,
+            id2token,
+            chunk,
+            verbose=verbose,
+            timestamps=timestamps,
+            time_offset=time_offset,
+        )
+        if timestamps and result.segments is not None:
+            segs = result.segments
+            if i < len(spans) - 1:
+                boundary = (start_sample + hop) / float(sample_rate)
+                segs = [s for s in segs if s.start < boundary]
+            all_segments.extend(segs)
+            if result.text:
+                parts.append(result.text)
+        elif result.text:
+            parts.append(result.text)
 
-    text = stitch_transcripts(parts)
-    if verbose and len(chunks) > 1:
+    if timestamps:
+        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(
+            parts
+        )
+        segments: Optional[List[TranscriptSegment]] = all_segments
+    else:
+        text = stitch_transcripts(parts)
+        segments = None
+
+    if verbose and len(spans) > 1:
         print(text)
-    return text
+    return DecodeResult(text=text, segments=segments)
 
 
 def _infer_model_size_key(encoder_path: str, profile: Optional[str]) -> str:
@@ -710,19 +869,25 @@ def model_config_from_encoder_path(
 
     enc = encoder_path
     if ".en" in enc:
-        sot_sequence = [50257, 50362]
+        notimestamps_id = 50362
+        timestamp_begin = 50363
+        sot_sequence = [50257, notimestamps_id]
         eot = 50256
         n_mels, mel_time_frames = 80, 3000
     elif size_key == "turbo":
         # large-v3 / turbo: vocab with 100 languages → transcribe=50360, notimestamps=50364
         lang_id = _language_token_id(lang)
-        sot_sequence = [50258, lang_id, 50360, 50364]
+        notimestamps_id = 50364
+        timestamp_begin = 50365
+        sot_sequence = [50258, lang_id, 50360, notimestamps_id]
         eot = 50257
         n_mels, mel_time_frames = 128, 3000
     else:
         # tiny..medium multilingual (99 langs): transcribe=50359, notimestamps=50363
         lang_id = _language_token_id(lang)
-        sot_sequence = [50258, lang_id, 50359, 50363]
+        notimestamps_id = 50363
+        timestamp_begin = 50364
+        sot_sequence = [50258, lang_id, 50359, notimestamps_id]
         eot = 50257
         n_mels, mel_time_frames = 80, 3000
 
@@ -747,6 +912,8 @@ def model_config_from_encoder_path(
         n_text_state,
         n_mels,
         mel_time_frames,
+        notimestamps_id,
+        timestamp_begin,
     )
 
 
