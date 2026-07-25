@@ -35,6 +35,8 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
 
       - name: Build dev image
         uses: docker/build-push-action@v6
@@ -46,8 +48,6 @@ jobs:
           tags: whisper-rknn-dev:latest
           load: true
           push: false
-          cache-from: type=gha,scope=whisper-rknn-dev
-          cache-to: type=gha,mode=max,scope=whisper-rknn-dev
 
       - name: Lint with ruff
         run: |
