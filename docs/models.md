@@ -71,7 +71,7 @@ WHISPER_MODEL_PROFILE=turbo
 
 1. Модели `.rknn` должны быть собраны toolchain, совместимым с `librknnrt.so` из [`third_party/`](../third_party/README.md).
 2. Целевая платформа inference: **RK3588** (`privileged: true` в compose для доступа к NPU).
-3. Версия `rknn_toolkit_lite2` в образе: **2.1.0** (см. `Dockerfile`).
+3. Версия `rknn_toolkit_lite2` / `librknnrt.so` в образе: **2.3.2** ([airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2), см. `Dockerfile`).
 
 ## Раскладка файлов
 

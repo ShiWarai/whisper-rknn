@@ -319,13 +319,99 @@ class RKNNModel:
         )
 
 
-def decode_utterance(
-    model: RKNNModel, id2token: dict, wav_16k_path: str, verbose: bool = True
-) -> str:
-    samples, sample_rate = load_audio_wav(wav_16k_path)
-    if sample_rate != 16000:
-        samples = resample_linear(samples, sample_rate, 16000)
+def whisper_window_samples(sample_rate: int = 16000, mel_time_frames: int = 3000) -> int:
+    """Samples per model window (~30 s for mel_time_frames=3000 @ 100 frames/s)."""
+    seconds = float(mel_time_frames) / 100.0
+    return max(1, int(round(seconds * sample_rate)))
 
+
+def iter_audio_chunks(
+    samples: np.ndarray,
+    chunk_samples: int,
+    overlap_samples: int = 0,
+) -> List[np.ndarray]:
+    """
+    Sliding windows of length ``chunk_samples`` (RKNN mel window, e.g. 30 s / 3000 frames).
+
+    ``overlap_samples`` advances the window by ``chunk_samples - overlap`` so the
+    model input stays ≤3000 frames while neighbouring chunks share audio.
+    The last window may be shorter (feature pad / pad_or_trim fills the rest).
+    """
+    n = int(samples.shape[0])
+    if n <= 0:
+        return [samples]
+    if n <= chunk_samples:
+        return [samples]
+
+    overlap_samples = int(max(0, min(overlap_samples, chunk_samples - 1)))
+    hop = chunk_samples - overlap_samples
+    chunks: List[np.ndarray] = []
+    start = 0
+    while start < n:
+        end = min(start + chunk_samples, n)
+        chunks.append(samples[start:end])
+        if end >= n:
+            break
+        start += hop
+        # Snap final window to the end so a tiny tail is not a near-duplicate hop.
+        if start < n and start + chunk_samples >= n and n - start < hop:
+            final_start = max(0, n - chunk_samples)
+            if final_start > start:
+                start = final_start
+            # else next loop takes start:n (short tail) — fine
+    return chunks
+
+
+def stitch_transcripts(parts: List[str]) -> str:
+    """Join chunk texts; drop duplicated overlap (longest word suffix/prefix match)."""
+    cleaned = [p.strip() for p in parts if p and p.strip()]
+    if not cleaned:
+        return ""
+    out = cleaned[0]
+    for nxt in cleaned[1:]:
+        out = _merge_overlap_text(out, nxt)
+    return out.strip()
+
+
+def _merge_overlap_text(left: str, right: str) -> str:
+    """Append ``right`` to ``left``, removing the longest shared word boundary."""
+    lw = left.split()
+    rw = right.split()
+    if not lw:
+        return right
+    if not rw:
+        return left
+
+    max_k = min(len(lw), len(rw), 48)
+
+    def _norm(w: str) -> str:
+        return w.lower().strip(".,!?;:«»\"'()[]")
+
+    best = 0
+    for k in range(max_k, 0, -1):
+        if [_norm(x) for x in lw[-k:]] == [_norm(x) for x in rw[:k]]:
+            best = k
+            break
+    if best:
+        return " ".join(lw + rw[best:])
+    return left + " " + right
+
+
+def _tokens_to_text(ans: List[int], id2token: dict) -> str:
+    pieces = []
+    for i in ans:
+        if i in id2token:
+            pieces.append(base64.b64decode(id2token[i]))
+    return b"".join(pieces).decode().strip()
+
+
+def decode_samples(
+    model: RKNNModel,
+    id2token: dict,
+    samples: np.ndarray,
+    verbose: bool = True,
+) -> str:
+    """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
     features = compute_features(
         samples,
         n_mels=model.n_mels,
@@ -337,6 +423,7 @@ def decode_utterance(
     self_kv = model.get_self_cache()
 
     offset = np.array([0], dtype=np.int32)
+    out = None
     for t in model.sot_sequence:
         token = np.array([[t]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
@@ -347,9 +434,9 @@ def decode_utterance(
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
 
+    assert out is not None
     idx = out[0][0, 0].argmax()
-    eot = model.eot
-    ans = []
+    ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
 
     def _repeating_tail(tokens: List[int]) -> bool:
@@ -369,10 +456,9 @@ def decode_utterance(
                 return True
         return False
 
-    while idx != eot and offset.item() < 100:
-        ans.append(idx)
+    while idx != model.eot and offset.item() < 100:
+        ans.append(int(idx))
         if _repeating_tail(ans):
-            # Drop the repeating tail pattern copies beyond one occurrence
             for n in (1, 2, 3, 4):
                 need = n * max_ngram_repeats
                 if len(ans) >= need and ans[-n:] * max_ngram_repeats == ans[-need:]:
@@ -391,12 +477,72 @@ def decode_utterance(
 
     if verbose:
         print(ans)
-    pieces = []
-    for i in ans:
-        if i in id2token:
-            pieces.append(base64.b64decode(id2token[i]))
-    text = b"".join(pieces).decode().strip()
+    text = _tokens_to_text(ans, id2token)
     if verbose:
+        print(text)
+    return text
+
+
+def decode_utterance(
+    model: RKNNModel, id2token: dict, wav_16k_path: str, verbose: bool = True
+) -> str:
+    """
+    Full utterance: if longer than the model window (~30 s / 3000 mel), split into
+    sliding chunks of that window size (optional overlap), decode each, stitch text.
+    """
+    samples, sample_rate = load_audio_wav(wav_16k_path)
+    if sample_rate != 16000:
+        samples = resample_linear(samples, sample_rate, 16000)
+        sample_rate = 16000
+
+    # Hard cap: never feed more samples than the static RKNN window (3000 mel ≈ 30 s).
+    chunk_samples = whisper_window_samples(sample_rate, model.mel_time_frames)
+    env_sec = os.environ.get("WHISPER_CHUNK_SECONDS", "").strip()
+    if env_sec:
+        try:
+            sec = float(env_sec)
+            if sec > 0:
+                chunk_samples = min(
+                    chunk_samples, max(1, int(round(sec * sample_rate)))
+                )
+        except ValueError:
+            pass
+
+    # Overlap must stay inside the window so each encode still sees ≤3000 frames.
+    overlap_samples = 0
+    env_ov = os.environ.get("WHISPER_CHUNK_OVERLAP_SECONDS", "5").strip()
+    if env_ov:
+        try:
+            ov_sec = float(env_ov)
+            if ov_sec > 0:
+                overlap_samples = min(
+                    chunk_samples - 1,
+                    max(0, int(round(ov_sec * sample_rate))),
+                )
+        except ValueError:
+            pass
+
+    chunks = iter_audio_chunks(
+        samples, chunk_samples, overlap_samples=overlap_samples
+    )
+    if verbose or len(chunks) > 1:
+        dur_s = len(samples) / float(sample_rate)
+        print(
+            f"audio_chunks={len(chunks)} duration_s={dur_s:.2f} "
+            f"window_s={chunk_samples / sample_rate:.2f} "
+            f"overlap_s={overlap_samples / sample_rate:.2f}"
+        )
+
+    parts: List[str] = []
+    for i, chunk in enumerate(chunks):
+        if verbose and len(chunks) > 1:
+            print(f"chunk {i + 1}/{len(chunks)} samples={len(chunk)}")
+        part = decode_samples(model, id2token, chunk, verbose=verbose)
+        if part:
+            parts.append(part)
+
+    text = stitch_transcripts(parts)
+    if verbose and len(chunks) > 1:
         print(text)
     return text
 

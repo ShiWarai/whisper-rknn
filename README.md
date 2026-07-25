@@ -112,7 +112,7 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 | Путь | Назначение |
 |------|------------|
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
-| `third_party/rknn_toolkit_lite2-2.1.0-cp310-cp310-linux_aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
+| `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
 | Каталог моделей на хосте | `encoder.rknn`, `decoder.rknn`, `tokens.txt` |
 
 Версия **`librknnrt.so`** должна совпадать с toolchain, которым собраны `.rknn`. Подробнее: [docs/models.md](docs/models.md).
@@ -154,6 +154,8 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
+| `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
+| `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
 
 ---
 
