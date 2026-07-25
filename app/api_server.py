@@ -12,9 +12,10 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.auth import require_api_key
 from app.decode import (
     RKNNModel,
     _install_root,
@@ -111,6 +112,12 @@ def _load_model_sync() -> None:
         mel_time_frames=mel_time_frames,
         verbose=False,
     )
+    from app.auth import auth_enabled
+
+    if auth_enabled():
+        print("api auth: enabled (Bearer WHISPER_API_KEY / OPENAI_API_KEY)")
+    else:
+        print("api auth: disabled (set WHISPER_API_KEY to require Authorization header)")
 
 
 @asynccontextmanager
@@ -133,7 +140,7 @@ async def health():
     return {"status": "ok" if ok else "loading"}
 
 
-@app.post("/transcribe", response_model=TranscribeResponse)
+@app.post("/transcribe", response_model=TranscribeResponse, dependencies=[Depends(require_api_key)])
 async def transcribe(file: UploadFile = File(...)):
     if _model is None or _id2token is None:
         raise HTTPException(status_code=503, detail="Model not ready")

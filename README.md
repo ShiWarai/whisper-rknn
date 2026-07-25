@@ -127,8 +127,10 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/health` | `{ "status": "ok" }` или `"loading"` |
+| GET | `/health` | `{ "status": "ok" }` или `"loading"` (без авторизации) |
 | POST | `/transcribe` | `multipart/form-data`, поле `file` → `{ "text", "elapsed_s" }` |
+
+При заданном `WHISPER_API_KEY` / `OPENAI_API_KEY`: заголовок `Authorization: Bearer <key>` (как у OpenAI API).
 
 Пример:
 
@@ -159,6 +161,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
+| `WHISPER_API_KEY` | — | Bearer-ключ для `POST /transcribe` (alias: `OPENAI_API_KEY`); пусто = без auth |
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
 | `WHISPER_MAX_NGRAM_REPEAT` | `6` | Остановка при зацикливании n-грамм в декодере |

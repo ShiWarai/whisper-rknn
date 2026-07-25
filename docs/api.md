@@ -6,6 +6,35 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 
 Базовый URL в compose-сети: `http://whisper-rknn-api:${PORT}` (пример ниже — с `PORT=9003`).
 
+## Авторизация (OpenAI-совместимая)
+
+Если задан **`WHISPER_API_KEY`** (или **`OPENAI_API_KEY`** как alias), эндпоинт `POST /transcribe` требует заголовок:
+
+```http
+Authorization: Bearer <ваш_ключ>
+```
+
+Несколько ключей: через запятую в `WHISPER_API_KEY` (`key1,key2`).
+
+`GET /health` остаётся без авторизации (healthcheck / мониторинг).
+
+Если ключ **не задан**, API открыт (как раньше) — удобно для изолированной Docker-сети.
+
+**401** (тело в стиле OpenAI):
+
+```json
+{
+  "detail": {
+    "error": {
+      "message": "Incorrect API key provided: your_key",
+      "type": "invalid_request_error",
+      "param": null,
+      "code": "invalid_api_key"
+    }
+  }
+}
+```
+
 ## Предобработка аудио
 
 Загруженный файл декодируется **in-process** через **PyAV**, собранный против vendored **ffmpeg-rockchip** (`libav` из `third_party/`), в **16 kHz mono float32** в RAM (без промежуточного WAV на диске).
@@ -68,6 +97,7 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопр�
 | Код | Причина |
 |-----|---------|
 | 413 | Файл слишком большой |
+| 401 | Нет или неверный `Authorization: Bearer` (если задан `WHISPER_API_KEY`) |
 | 503 | Модель ещё не загружена |
 | 400 | Некорректное аудио или ошибка декодирования |
 
@@ -82,7 +112,8 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 docker run --rm --network whisper_rknn_default \
   -v /path/to/audio:/data:ro \
   curlimages/curl:latest \
-  -s -F "file=@/data/voice.ogg" \
+  -s -H "Authorization: Bearer $WHISPER_API_KEY" \
+  -F "file=@/data/voice.ogg" \
   http://whisper-rknn-api:9003/transcribe
 ```
 
