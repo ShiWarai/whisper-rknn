@@ -20,6 +20,7 @@ services:
       WHISPER_MODELS_DIR: ${WHISPER_MODELS_DIR}
       WHISPER_MODEL_PROFILE: ${WHISPER_MODEL_PROFILE:-turbo}
       WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-ru}
+      WHISPER_NPU_CORE_MASK: ${WHISPER_NPU_CORE_MASK:-0_1_2}
       WHISPER_ENCODER: /models/encoder.rknn
       WHISPER_DECODER: /models/decoder.rknn
       WHISPER_TOKENS: /models/tokens.txt

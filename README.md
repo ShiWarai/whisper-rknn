@@ -149,6 +149,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
 | `WHISPER_LANGUAGE` | `ru` | Язык распознавания: код Whisper (`ru`, `en`, `uk`, …). **Обязательно** задать под ваше аудио — иначе turbo может «галлюцинировать» на английском |
+| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2` (все), `all`, `auto` |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (для логов; volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |

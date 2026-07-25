@@ -206,18 +206,53 @@ def load_tokens(filename):
     return tokens
 
 
-def init_model(filename, target_platform="rk3588"):
+def resolve_npu_core_mask(name: Optional[str] = None) -> int:
+    """
+    Map WHISPER_NPU_CORE_MASK to RKNNLite constants.
+    Default: NPU_CORE_0_1_2 (all three cores on RK3588).
+    """
+    raw = (name if name is not None else os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2")).strip()
+    aliases = {
+        "0": "NPU_CORE_0",
+        "1": "NPU_CORE_1",
+        "2": "NPU_CORE_2",
+        "0_1": "NPU_CORE_0_1",
+        "0_1_2": "NPU_CORE_0_1_2",
+        "all": "NPU_CORE_ALL",
+        "auto": "NPU_CORE_AUTO",
+        "NPU_CORE_0": "NPU_CORE_0",
+        "NPU_CORE_1": "NPU_CORE_1",
+        "NPU_CORE_2": "NPU_CORE_2",
+        "NPU_CORE_0_1": "NPU_CORE_0_1",
+        "NPU_CORE_0_1_2": "NPU_CORE_0_1_2",
+        "NPU_CORE_ALL": "NPU_CORE_ALL",
+        "NPU_CORE_AUTO": "NPU_CORE_AUTO",
+    }
+    key = aliases.get(raw, aliases.get(raw.upper()))
+    if key is None:
+        raise ValueError(
+            f"Unknown WHISPER_NPU_CORE_MASK={raw!r}; use 0, 0_1, 0_1_2, all, auto"
+        )
+    return int(getattr(RKNNLite, key))
+
+
+def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = None):
     if not Path(filename).is_file():
         raise FileNotFoundError(f"{filename} does not exist")
+
+    if core_mask is None:
+        core_mask = resolve_npu_core_mask()
 
     rknn_lite = RKNNLite(verbose=False)
     ret = rknn_lite.load_rknn(path=filename)
     if ret != 0:
         raise RuntimeError(f"Load model {filename} failed!")
 
-    ret = rknn_lite.init_runtime(core_mask=RKNNLite.NPU_CORE_0)
+    ret = rknn_lite.init_runtime(core_mask=core_mask)
     if ret != 0:
-        raise RuntimeError(f"Failed to init rknn runtime for {filename}")
+        raise RuntimeError(
+            f"Failed to init rknn runtime for {filename} (core_mask={core_mask})"
+        )
     return rknn_lite
 
 
@@ -244,12 +279,14 @@ class RKNNModel:
         self.n_mels = n_mels
         self.mel_time_frames = mel_time_frames
 
+        core_mask = resolve_npu_core_mask()
         if verbose:
             print("sot_sequence", self.sot_sequence)
             print("eot", self.eot)
+            print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
 
-        self.encoder = init_model(encoder)
-        self.decoder = init_model(decoder)
+        self.encoder = init_model(encoder, core_mask=core_mask)
+        self.decoder = init_model(decoder, core_mask=core_mask)
 
     def release(self):
         self.encoder.release()
