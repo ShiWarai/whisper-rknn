@@ -15,12 +15,14 @@ Vendored из [video-descriptor-rkllm](https://github.com/ShiWarai/video-descrip
 
 | Путь | Назначение |
 |------|------------|
-| `ffmpeg-rockchip/bin/ffmpeg`, `ffprobe` | Декод аудио/видео в контейнере |
+| `ffmpeg-rockchip/include/` | libav headers для сборки PyAV |
+| `ffmpeg-rockchip/lib/pkgconfig/` | `.pc` для `PKG_CONFIG_PATH` |
 | `ffmpeg-rockchip/lib/*.so` | FFmpeg + `librockchip_mpp`, `librga` |
+| `ffmpeg-rockchip/bin/ffmpeg`, `ffprobe` | Fallback CLI (основной путь — PyAV in-process) |
 
-В образе: `PATH` и `LD_LIBRARY_PATH` указывают на этот каталог. В compose проброшены `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap`.
+В образе: `LD_LIBRARY_PATH` указывает на `lib/`; PyAV собирается против этих `.so`. В compose проброшены `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap`.
 
-Переопределить бинарник: `FFMPEG_BIN=/path/to/ffmpeg`.
+Переопределить fallback-бинарник: `FFMPEG_BIN=/path/to/ffmpeg`.
 
 ## Совместимость
 

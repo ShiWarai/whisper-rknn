@@ -8,9 +8,9 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 
 ## Предобработка аудио
 
-Загруженный файл конвертируется в **16 kHz mono PCM** через **ffmpeg-rockchip** (vendored в образе, rkmpp/rkrga на RK3588). Форматы без ffmpeg — только WAV/FLAC через `soundfile` (fallback).
+Загруженный файл декодируется **in-process** через **PyAV**, собранный против vendored **ffmpeg-rockchip** (`libav` из `third_party/`), в **16 kHz mono float32** в RAM (без промежуточного WAV на диске).
 
-Переопределение бинарника: `FFMPEG_BIN` в `.env`.
+Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопределение fallback-бинарника: `FFMPEG_BIN` в `.env`.
 
 ## `GET /health`
 
@@ -34,7 +34,7 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 
 **Тело:** `multipart/form-data`, поле **`file`**.
 
-Поддерживаемые форматы (через ffmpeg-rockchip): ogg, wav, mp3, m4a, flac, opus, webm и др.
+Поддерживаемые форматы (через PyAV / ffmpeg-rockchip): ogg, wav, mp3, m4a, flac, opus, webm и др.
 
 **Лимит размера:** `MAX_UPLOAD_MB` (по умолчанию 25 MB).
 

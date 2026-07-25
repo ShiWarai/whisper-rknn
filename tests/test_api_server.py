@@ -32,7 +32,10 @@ def test_health_ok(client):
 
 def test_transcribe_returns_text(client):
     with (
-        patch("app.api_server.prepare_audio_16k_mono", return_value=("/tmp/x.wav", None)),
+        patch(
+            "app.api_server.load_audio_16k_mono",
+            return_value=__import__("numpy").zeros(16000, dtype="float32"),
+        ),
         patch("app.api_server.decode_utterance", return_value="привет"),
     ):
         response = client.post(

@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import os
-import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,9 +20,9 @@ from app.decode import (
     _install_root,
     apply_librknnrt_from_optional_path,
     decode_utterance,
+    load_audio_16k_mono,
     load_tokens,
     model_config_from_encoder_path,
-    prepare_audio_16k_mono,
     resolve_librknnrt_path,
 )
 
@@ -164,23 +164,19 @@ async def transcribe(file: UploadFile = File(...)):
     cache_dir = _install_root() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    fd, raw_path = tempfile.mkstemp(suffix=suffix, prefix="whisper_api_in_", dir=cache_dir)
-    os.close(fd)
-    Path(raw_path).write_bytes(body)
-
     async with _infer_lock:
         loop = asyncio.get_running_loop()
 
         def _run():
-            wav_path, tmp = prepare_audio_16k_mono(str(raw_path), cache_dir)
-            try:
-                t0 = time.time()
-                text = decode_utterance(_model, _id2token, wav_path, verbose=False)
-                elapsed = time.time() - t0
-                return text, elapsed
-            finally:
-                if tmp is not None:
-                    tmp.unlink(missing_ok=True)
+            t0 = time.time()
+            samples = load_audio_16k_mono(
+                io.BytesIO(body),
+                format_hint=suffix,
+                cache_dir=cache_dir,
+            )
+            text = decode_utterance(_model, _id2token, samples, verbose=False)
+            elapsed = time.time() - t0
+            return text, elapsed
 
         try:
             text, elapsed = await loop.run_in_executor(None, _run)
@@ -188,8 +184,6 @@ async def transcribe(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail=str(e)) from e
         except RuntimeError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        finally:
-            Path(raw_path).unlink(missing_ok=True)
 
     return TranscribeResponse(text=text, elapsed_s=round(elapsed, 3))
 

@@ -7,8 +7,10 @@ import pytest
 
 from app.audio_features import N_SAMPLES, compute_features, pad_or_trim
 from app.decode import (
+    _HAS_AV,
     causal_mask_1d,
     iter_audio_chunks,
+    load_audio_16k_mono,
     model_config_from_encoder_path,
     resample_linear,
     stitch_transcripts,
@@ -144,3 +146,31 @@ def test_compute_features_base_shape():
 def test_language_token_id_ru_en():
     assert language_token_id("ru") == 50263
     assert language_token_id("en") == 50259
+
+
+def _write_test_wav(path: str, sample_rate: int = 48000, duration_s: float = 0.1) -> None:
+    import soundfile as sf
+
+    n = max(1, int(round(sample_rate * duration_s)))
+    t = np.linspace(0.0, duration_s, n, endpoint=False, dtype=np.float64)
+    samples = (0.5 * np.sin(2.0 * np.pi * 440.0 * t)).astype(np.float32)
+    sf.write(path, samples, sample_rate)
+
+
+def test_load_audio_16k_mono_from_wav_path(tmp_path):
+    wav = tmp_path / "tone.wav"
+    _write_test_wav(str(wav), sample_rate=48000, duration_s=0.1)
+    out = load_audio_16k_mono(str(wav))
+    assert out.dtype == np.float32
+    assert out.ndim == 1
+    expected_len = max(1, int(round(0.1 * 16000)))
+    assert abs(len(out) - expected_len) <= 2
+
+
+@pytest.mark.skipif(not _HAS_AV, reason="PyAV not installed")
+def test_load_audio_16k_mono_from_bytes(tmp_path):
+    wav = tmp_path / "tone.wav"
+    _write_test_wav(str(wav), sample_rate=16000, duration_s=0.05)
+    out = load_audio_16k_mono(wav.read_bytes(), format_hint=".wav")
+    assert out.dtype == np.float32
+    assert len(out) > 0

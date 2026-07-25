@@ -16,7 +16,7 @@
 |-----------|------------|
 | Inference | RKNN Toolkit Lite 2, `librknnrt`, numpy mel (без PyTorch) |
 | API | FastAPI, Uvicorn |
-| Аудио | ffmpeg-rockchip (MPP/RGA), soundfile, kaldi_native_fbank |
+| Аудио | PyAV (libav ffmpeg-rockchip in-process), soundfile/kaldi_native_fbank |
 | Инфраструктура | Docker, Docker Compose, GHCR |
 | CI | GitHub Actions, ruff, pytest |
 | Платформа | **linux/arm64** (RK3588 NPU) |
@@ -115,7 +115,7 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 |------|------------|
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
 | `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
-| `third_party/ffmpeg-rockchip/` | Vendored ffmpeg с rkmpp/rkrga для декода ogg/mp3/… |
+| `third_party/ffmpeg-rockchip/` | Vendored libav + rkmpp/rkrga; PyAV in-process decode |
 | `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
 | Каталог моделей на хосте | `encoder.rknn`, `decoder.rknn`, `tokens.txt` |
 
@@ -156,7 +156,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2` (все), `all`, `auto` |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
-| `FFMPEG_BIN` | из `PATH` | Бинарник ffmpeg (в образе — vendored ffmpeg-rockchip) |
+| `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
