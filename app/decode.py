@@ -4,7 +4,7 @@
 
 """
 Whisper RKNN: fbank -> encoder/decoder RKNN -> text.
-Аудио: PyAV (libav ffmpeg-rockchip in-process) -> 16 kHz mono float32 в RAM.
+Аудио: PyAV (libav in-process) -> 16 kHz mono float32 в RAM.
 Fallback: soundfile (WAV/FLAC), CLI ffmpeg (f32le pipe).
 """
 
@@ -285,8 +285,8 @@ def load_audio_16k_mono(
     """
     Decode audio to 16 kHz mono float32 in RAM.
 
-    Primary path: PyAV linked against vendored ffmpeg-rockchip.
-    Fallbacks: soundfile (WAV/FLAC), CLI ffmpeg f32le pipe.
+    Primary path: PyAV (libav API, in-process).
+    Fallbacks: soundfile (WAV/FLAC), CLI ffmpeg f32le pipe (last resort).
     """
     errors: List[str] = []
 

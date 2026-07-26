@@ -37,9 +37,9 @@ Authorization: Bearer <ваш_ключ>
 
 ## Предобработка аудио
 
-Загруженный файл декодируется **in-process** через **PyAV**, собранный против vendored **ffmpeg-rockchip** (`libav` из `third_party/`), в **16 kHz mono float32** в RAM (без промежуточного WAV на диске).
+Загруженный файл декодируется **in-process** через **PyAV** (libav API, prebuilt wheel в образе) в **16 kHz mono float32** в RAM (без промежуточного WAV на диске).
 
-Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопределение fallback-бинарника: `FFMPEG_BIN` в `.env`.
+Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe (аварийный путь). Переопределение fallback-бинарника: `FFMPEG_BIN` в `.env`.
 
 ## `GET /health`
 
@@ -68,9 +68,15 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопр�
 | `file` | file | — | Аудиофайл |
 | `timestamps` | bool | `false` | Сегментные метки времени Whisper (`start`/`end`) для сопоставления с кадрами видео |
 
-Поддерживаемые форматы (через PyAV / ffmpeg-rockchip): ogg, wav, mp3, m4a, flac, opus, webm и др.
+Поддерживаемые форматы (через PyAV / libav): ogg, wav, mp3, m4a, flac, opus, webm и др.
 
 **Лимит размера:** `MAX_UPLOAD_MB` (по умолчанию 25 MB).
+
+### Защита от OOM (RAM)
+
+Перед декодированием сервис сравнивает консервативную оценку пика RAM запроса (тело файла + PCM + mel + KV decoder) с **`MemAvailable`** из `/proc/meminfo`. При нехватке памяти — **507** (клиент может уменьшить файл или подождать).
+
+Оценка PCM ограничена `WHISPER_MAX_AUDIO_SECONDS` (по умолчанию `600` с). При старте контейнера аналогичная проверка выполняется перед загрузкой `.rknn` (если RAM мало — сервис не станет ready).
 
 ### Длинное аудио (>30 с)
 
@@ -117,6 +123,7 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопр�
 | Код | Причина |
 |-----|---------|
 | 413 | Файл слишком большой |
+| 507 | Недостаточно свободной RAM для этого запроса (прогноз по MemAvailable) |
 | 401 | Нет или неверный `Authorization: Bearer` (если задан `WHISPER_API_KEY`) |
 | 503 | Модель ещё не загружена |
 | 400 | Некорректное аудио или ошибка декодирования |

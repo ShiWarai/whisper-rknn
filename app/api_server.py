@@ -26,6 +26,12 @@ from app.decode import (
     model_config_from_encoder_path,
     resolve_librknnrt_path,
 )
+from app.system_memory import (
+    estimate_model_ram_bytes,
+    estimate_request_ram_bytes,
+    has_enough_ram,
+    model_ram_check_message,
+)
 
 
 def _restore_std_log_levels() -> None:
@@ -96,6 +102,12 @@ def _load_model_sync() -> None:
     ):
         if not path or not Path(path).is_file():
             raise FileNotFoundError(f"{name} must point to an existing file: {path!r}")
+
+    model_ram_need = estimate_model_ram_bytes(_encoder_path, _decoder_path)
+    ok, reason = has_enough_ram(model_ram_need, context="model RSS")
+    print(model_ram_check_message(model_ram_need))
+    if not ok:
+        raise RuntimeError(reason)
 
     (
         sot_sequence,
@@ -169,6 +181,17 @@ async def transcribe(
             status_code=413,
             detail=f"File too large (max {_max_upload_mb} MB)",
         )
+
+    request_ram_need = estimate_request_ram_bytes(
+        len(body),
+        _model.n_mels,
+        _model.n_text_layer,
+        _model.n_text_ctx,
+        _model.n_text_state,
+    )
+    ok, reason = has_enough_ram(request_ram_need)
+    if not ok:
+        raise HTTPException(status_code=507, detail=reason)
 
     suffix = Path(file.filename or "audio").suffix or ".bin"
     if suffix.lower() not in (

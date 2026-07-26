@@ -13,7 +13,12 @@ from app.auth import reload_api_keys
 def _fake_load_model_sync():
     import app.api_server as srv
 
-    srv._model = MagicMock(name="RKNNModel")
+    model = MagicMock(name="RKNNModel")
+    model.n_mels = 80
+    model.n_text_layer = 4
+    model.n_text_ctx = 448
+    model.n_text_state = 384
+    srv._model = model
     srv._id2token = {1: "aGVsbG8="}
 
 
@@ -41,6 +46,7 @@ def test_health_ok(client):
 
 def test_transcribe_returns_text(client):
     with (
+        patch("app.api_server.has_enough_ram", return_value=(True, "")),
         patch(
             "app.api_server.load_audio_16k_mono",
             return_value=__import__("numpy").zeros(16000, dtype="float32"),
@@ -76,6 +82,7 @@ def test_transcribe_with_timestamps(client):
         ],
     )
     with (
+        patch("app.api_server.has_enough_ram", return_value=(True, "")),
         patch(
             "app.api_server.load_audio_16k_mono",
             return_value=__import__("numpy").zeros(16000, dtype="float32"),
@@ -115,6 +122,7 @@ def test_transcribe_accepts_bearer_key(client, monkeypatch):
     reload_api_keys()
 
     with (
+        patch("app.api_server.has_enough_ram", return_value=(True, "")),
         patch(
             "app.api_server.load_audio_16k_mono",
             return_value=__import__("numpy").zeros(16000, dtype="float32"),
@@ -151,3 +159,17 @@ def test_transcribe_model_not_ready():
             )
 
     assert response.status_code == 503
+
+
+def test_transcribe_insufficient_ram_returns_507(client):
+    with patch(
+        "app.api_server.has_enough_ram",
+        return_value=(False, "insufficient RAM: need ~512 MiB (estimated request peak)"),
+    ):
+        response = client.post(
+            "/transcribe",
+            files={"file": ("voice.ogg", b"fake-audio", "audio/ogg")},
+        )
+
+    assert response.status_code == 507
+    assert "insufficient RAM" in response.json()["detail"]

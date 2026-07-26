@@ -1,8 +1,6 @@
 # Whisper RKNN HTTP API — build on linux/arm64 (RK3588) with NPU.
 # Before build: third_party/rknn_toolkit_lite2-2.3.2-*-aarch64.whl + third_party/librknnrt.so
-# (same version as your .rknn models; currently 2.3.2 from airockchip/rknn-toolkit2).
-# ffmpeg: vendored third_party/ffmpeg-rockchip (rkmpp/rkrga), same as video-descriptor-rkllm.
-# PyAV is built from source against vendored libav (in-process audio decode).
+# Audio: PyAV in-process (prebuilt wheel with bundled libav). apt ffmpeg — только CLI fallback.
 
 FROM python:3.10-slim-bookworm
 
@@ -12,76 +10,31 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Runtime libs for vendored ffmpeg-rockchip (no apt ffmpeg).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        libdrm2 \
         libgomp1 \
-        liblzma5 \
-        libopus0 \
-        libmp3lame0 \
-        libvorbis0a \
-        libvorbisenc2 \
-        libssl3 \
-        zlib1g \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/whisper-rknn
 
-COPY third_party/ffmpeg-rockchip/ ./third_party/ffmpeg-rockchip/
-RUN cd ./third_party/ffmpeg-rockchip/lib \
-    && if [ -f librockchip_mpp.so.1 ]; then \
-        rm -f librockchip_mpp.so librockchip_mpp.so.0; \
-        ln -sf librockchip_mpp.so.1 librockchip_mpp.so.0; \
-        ln -sf librockchip_mpp.so.1 librockchip_mpp.so; \
-    fi
-
-# Build PyAV against vendored ffmpeg-rockchip (same .so as runtime).
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        pkg-config \
-        cython3 \
-        libdrm-dev \
-        libopus-dev \
-        libmp3lame-dev \
-        libvorbis-dev \
-        libssl-dev \
-        zlib1g-dev \
-    && pip install -U pip wheel cython \
-    && export PKG_CONFIG_PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/lib/pkgconfig \
-    && export LD_LIBRARY_PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/lib \
-    && pip install av==17.1.0 --no-binary av \
-    && apt-get purge -y --auto-remove \
-        build-essential \
-        pkg-config \
-        cython3 \
-        libdrm-dev \
-        libopus-dev \
-        libmp3lame-dev \
-        libvorbis-dev \
-        libssl-dev \
-        zlib1g-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -U pip \
+    && pip install -r requirements.txt
 
 COPY third_party/librknnrt.so third_party/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl /tmp/rknn_bundle/
 
 RUN set -e; \
     pip install /tmp/rknn_bundle/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl; \
     cp /tmp/rknn_bundle/librknnrt.so /usr/lib/librknnrt.so; \
-    python -c "import rknnlite"; \
+    python -c "import rknnlite; import av; print('av', av.__version__)"; \
     rm -rf /tmp/rknn_bundle
 
 COPY app/ ./app/
 COPY scripts/docker-entrypoint.sh scripts/download_models.sh ./scripts/
 RUN chmod +x ./scripts/docker-entrypoint.sh ./scripts/download_models.sh
 
-ENV PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/bin:${PATH} \
-    LD_LIBRARY_PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/lib \
-    WHISPER_ENCODER=/models/encoder.rknn \
+ENV WHISPER_ENCODER=/models/encoder.rknn \
     WHISPER_DECODER=/models/decoder.rknn \
     WHISPER_TOKENS=/models/tokens.txt \
     WHISPER_MODEL_PROFILE=turbo \
@@ -90,7 +43,6 @@ ENV PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/bin:${PATH} \
 
 EXPOSE 8080
 
-# HOST/PORT читаются в api_server.py (не хардкодить в uvicorn CLI)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD python -c "import os,urllib.request; p=os.environ.get('PORT','8080'); urllib.request.urlopen('http://127.0.0.1:%s/health' % p, timeout=5)"
 
