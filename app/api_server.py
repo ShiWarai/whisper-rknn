@@ -16,12 +16,6 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app.auth import require_api_key
-from app.system_memory import (
-    estimate_model_ram_bytes,
-    estimate_request_ram_bytes,
-    has_enough_ram,
-    model_ram_check_message,
-)
 from app.decode import (
     RKNNModel,
     _install_root,
@@ -31,6 +25,12 @@ from app.decode import (
     load_tokens,
     model_config_from_encoder_path,
     resolve_librknnrt_path,
+)
+from app.system_memory import (
+    estimate_model_ram_bytes,
+    estimate_request_ram_bytes,
+    has_enough_ram,
+    model_ram_check_message,
 )
 
 
