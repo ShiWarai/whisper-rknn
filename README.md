@@ -66,6 +66,8 @@
 
 ### Локальная сборка (RK3588)
 
+**RAM:** профиль `turbo` (~1.7 GiB весов + пик запроса) рассчитан на платы с **≥8 GiB** и достаточным `MemAvailable`. На 2–4 GiB используйте `base`/`small`. Сервис отказывается загружать модель при старте и возвращает **507** на `/transcribe`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS`).
+
 Требуется `third_party/` с `librknnrt.so`, wheel rknnlite и **ffmpeg-rockchip** (уже в репозитории). См. [third_party/README.md](third_party/README.md).
 
 На хосте нужны устройства MPP/RGA (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
@@ -161,6 +163,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
 | `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
+| `WHISPER_MAX_AUDIO_SECONDS` | `600` | Потолок длительности для оценки RAM запроса; при нехватке MemAvailable — HTTP 507 |
 | `WHISPER_API_KEY` | — | Bearer-ключ для `POST /transcribe` (alias: `OPENAI_API_KEY`); пусто = без auth |
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
@@ -174,6 +177,7 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 whisper-rknn/
 ├── app/
 │   ├── api_server.py         # FastAPI + uvicorn
+│   ├── system_memory.py      # MemAvailable RAM forecast (startup + /transcribe)
 │   ├── decode.py             # RKNN encoder/decoder, chunking
 │   ├── audio_features.py     # mel-спектрограмма (numpy + knf)
 │   ├── whisper_languages.py  # language token ids без openai-whisper
