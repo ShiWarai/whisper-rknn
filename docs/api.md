@@ -6,11 +6,40 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 
 Базовый URL в compose-сети: `http://whisper-rknn-api:${PORT}` (пример ниже — с `PORT=9003`).
 
+## Авторизация (OpenAI-совместимая)
+
+Если задан **`WHISPER_API_KEY`** (или **`OPENAI_API_KEY`** как alias), эндпоинт `POST /transcribe` требует заголовок:
+
+```http
+Authorization: Bearer <ваш_ключ>
+```
+
+Несколько ключей: через запятую в `WHISPER_API_KEY` (`key1,key2`).
+
+`GET /health` остаётся без авторизации (healthcheck / мониторинг).
+
+Если ключ **не задан**, API открыт (как раньше) — удобно для изолированной Docker-сети.
+
+**401** (тело в стиле OpenAI):
+
+```json
+{
+  "detail": {
+    "error": {
+      "message": "Incorrect API key provided: your_key",
+      "type": "invalid_request_error",
+      "param": null,
+      "code": "invalid_api_key"
+    }
+  }
+}
+```
+
 ## Предобработка аудио
 
-Загруженный файл конвертируется в **16 kHz mono PCM** через **ffmpeg-rockchip** (vendored в образе, rkmpp/rkrga на RK3588). Форматы без ffmpeg — только WAV/FLAC через `soundfile` (fallback).
+Загруженный файл декодируется **in-process** через **PyAV**, собранный против vendored **ffmpeg-rockchip** (`libav` из `third_party/`), в **16 kHz mono float32** в RAM (без промежуточного WAV на диске).
 
-Переопределение бинарника: `FFMPEG_BIN` в `.env`.
+Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопределение fallback-бинарника: `FFMPEG_BIN` в `.env`.
 
 ## `GET /health`
 
@@ -32,9 +61,14 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 
 Распознавание речи из загруженного аудиофайла.
 
-**Тело:** `multipart/form-data`, поле **`file`**.
+**Тело:** `multipart/form-data`
 
-Поддерживаемые форматы (через ffmpeg-rockchip): ogg, wav, mp3, m4a, flac, opus, webm и др.
+| Поле | Тип | По умолчанию | Смысл |
+|------|-----|--------------|-------|
+| `file` | file | — | Аудиофайл |
+| `timestamps` | bool | `false` | Сегментные метки времени Whisper (`start`/`end`) для сопоставления с кадрами видео |
+
+Поддерживаемые форматы (через PyAV / ffmpeg-rockchip): ogg, wav, mp3, m4a, flac, opus, webm и др.
 
 **Лимит размера:** `MAX_UPLOAD_MB` (по умолчанию 25 MB).
 
@@ -59,15 +93,31 @@ HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию с
 ```json
 {
   "text": "распознанный текст",
-  "elapsed_s": 1.234
+  "elapsed_s": 1.234,
+  "segments": null
 }
 ```
 
+С `timestamps=true` поле `segments` заполняется (секунды от начала дорожки):
+
+```json
+{
+  "text": "Ну что ты орешь… Люся, дорогой…",
+  "elapsed_s": 12.5,
+  "segments": [
+    { "start": 0.0, "end": 2.4, "text": "Ну что ты орешь…" },
+    { "start": 2.4, "end": 5.2, "text": "Люся, дорогой…" }
+  ]
+}
+```
+
+Метки — **сегментные** (фразы), не по словам. Удобно отдавать VLM вместе с кадрами, чтобы сопоставить речь и картинку по таймлайну.
 **Ошибки**
 
 | Код | Причина |
 |-----|---------|
 | 413 | Файл слишком большой |
+| 401 | Нет или неверный `Authorization: Bearer` (если задан `WHISPER_API_KEY`) |
 | 503 | Модель ещё не загружена |
 | 400 | Некорректное аудио или ошибка декодирования |
 
@@ -82,7 +132,9 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 docker run --rm --network whisper_rknn_default \
   -v /path/to/audio:/data:ro \
   curlimages/curl:latest \
-  -s -F "file=@/data/voice.ogg" \
+  -s -H "Authorization: Bearer $WHISPER_API_KEY" \
+  -F "file=@/data/voice.ogg" \
+  -F "timestamps=true" \
   http://whisper-rknn-api:9003/transcribe
 ```
 

@@ -2,6 +2,7 @@
 numpy>=1.26,<2
 soundfile>=0.12
 kaldi_native_fbank>=1.22
+av==17.1.0
 
 # HTTP API
 fastapi>=0.115.0

@@ -78,7 +78,7 @@ WHISPER_MODEL_PROFILE=turbo
 1. Модели `.rknn` должны быть собраны toolchain, совместимым с `librknnrt.so` из [`third_party/`](../third_party/README.md).
 2. Целевая платформа inference: **RK3588** (`privileged: true` в compose для доступа к NPU).
 3. Версия `rknn_toolkit_lite2` / `librknnrt.so` в образе: **2.3.2** ([airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2), см. `Dockerfile`).
-4. Декод аудио: **ffmpeg-rockchip** из `third_party/` (те же бинарники, что в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)); устройства MPP/RGA в `docker-compose.yml`.
+4. Декод аудио: **PyAV** (libav из vendored **ffmpeg-rockchip** в `third_party/`, in-process, 16 kHz mono в RAM); fallback — CLI `ffmpeg`. Устройства MPP/RGA в `docker-compose.yml` (для видео/общей сборки ffmpeg-rockchip).
 
 ## Раскладка файлов
 

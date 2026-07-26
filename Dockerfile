@@ -2,6 +2,7 @@
 # Before build: third_party/rknn_toolkit_lite2-2.3.2-*-aarch64.whl + third_party/librknnrt.so
 # (same version as your .rknn models; currently 2.3.2 from airockchip/rknn-toolkit2).
 # ffmpeg: vendored third_party/ffmpeg-rockchip (rkmpp/rkrga), same as video-descriptor-rkllm.
+# PyAV is built from source against vendored libav (in-process audio decode).
 
 FROM python:3.10-slim-bookworm
 
@@ -27,10 +28,6 @@ RUN apt-get update \
 
 WORKDIR /opt/whisper-rknn
 
-COPY requirements.txt .
-RUN pip install -U pip wheel \
-    && pip install -r requirements.txt
-
 COPY third_party/ffmpeg-rockchip/ ./third_party/ffmpeg-rockchip/
 RUN cd ./third_party/ffmpeg-rockchip/lib \
     && if [ -f librockchip_mpp.so.1 ]; then \
@@ -38,6 +35,37 @@ RUN cd ./third_party/ffmpeg-rockchip/lib \
         ln -sf librockchip_mpp.so.1 librockchip_mpp.so.0; \
         ln -sf librockchip_mpp.so.1 librockchip_mpp.so; \
     fi
+
+# Build PyAV against vendored ffmpeg-rockchip (same .so as runtime).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        cython3 \
+        libdrm-dev \
+        libopus-dev \
+        libmp3lame-dev \
+        libvorbis-dev \
+        libssl-dev \
+        zlib1g-dev \
+    && pip install -U pip wheel cython \
+    && export PKG_CONFIG_PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/lib/pkgconfig \
+    && export LD_LIBRARY_PATH=/opt/whisper-rknn/third_party/ffmpeg-rockchip/lib \
+    && pip install av==17.1.0 --no-binary av \
+    && apt-get purge -y --auto-remove \
+        build-essential \
+        pkg-config \
+        cython3 \
+        libdrm-dev \
+        libopus-dev \
+        libmp3lame-dev \
+        libvorbis-dev \
+        libssl-dev \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
 COPY third_party/librknnrt.so third_party/rknn_toolkit_lite2-2.3.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl /tmp/rknn_bundle/
 
