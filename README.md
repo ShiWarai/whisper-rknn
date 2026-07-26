@@ -16,7 +16,7 @@
 |-----------|------------|
 | Inference | RKNN Toolkit Lite 2, `librknnrt`, numpy mel (без PyTorch) |
 | API | FastAPI, Uvicorn |
-| Аудио | PyAV (libav ffmpeg-rockchip in-process), soundfile/kaldi_native_fbank |
+| Аудио | PyAV (libav in-process), soundfile/kaldi_native_fbank |
 | Инфраструктура | Docker, Docker Compose, GHCR |
 | CI | GitHub Actions, ruff, pytest |
 | Платформа | **linux/arm64** (RK3588 NPU) |
@@ -68,16 +68,16 @@
 
 **RAM:** профиль `turbo` (~1.7 GiB весов + пик запроса) рассчитан на платы с **≥8 GiB** и достаточным `MemAvailable`. На 2–4 GiB используйте `base`/`small`. Сервис отказывается загружать модель при старте и возвращает **507** на `/transcribe`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS`).
 
-Требуется `third_party/` с `librknnrt.so`, wheel rknnlite и **ffmpeg-rockchip** (уже в репозитории). См. [third_party/README.md](third_party/README.md).
+Требуется `third_party/` с `librknnrt.so` и wheel rknnlite. См. [third_party/README.md](third_party/README.md).
 
-На хосте нужны устройства MPP/RGA (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
+На хосте нужны устройства NPU (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-Сервис: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**400 MB** (slim Python + vendored ffmpeg-rockchip, без PyTorch).
+Сервис: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel + apt ffmpeg, без PyTorch).
 
 ### Автозагрузка turbo
 
@@ -117,7 +117,6 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 |------|------------|
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
 | `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
-| `third_party/ffmpeg-rockchip/` | Vendored libav + rkmpp/rkrga; PyAV in-process decode |
 | `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
 | Каталог моделей на хосте | `encoder.rknn`, `decoder.rknn`, `tokens.txt` |
 
@@ -185,7 +184,6 @@ whisper-rknn/
 │       └── mel_filters.npz   # Whisper mel filters (80/128)
 ├── third_party/
 │   ├── librknnrt.so, rknn wheel
-│   └── ffmpeg-rockchip/      # rkmpp/rkrga (из video-descriptor-rkllm)
 ├── tests/
 ├── docs/
 │   ├── api.md
@@ -246,6 +244,6 @@ Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 
 MIT — см. [LICENSE](LICENSE).
 
-Код приложения — MIT. Бинарники Rockchip в `third_party/` — по условиям Rockchip RKNN SDK. **ffmpeg-rockchip** — GPL v3 (upstream nyanmisaka/ffmpeg-rockchip).
+Код приложения — MIT. Бинарники Rockchip в `third_party/` — по условиям Rockchip RKNN SDK. Системный `ffmpeg` в образе — по лицензии Debian (GPL/LGPL компоненты libav).
 
 _Проект создан с использованием нейросетей._
