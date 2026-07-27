@@ -5,7 +5,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.audio_features import N_SAMPLES, _stft_power, _stft_power_loop, compute_features, pad_or_trim
+from app.audio_features import (
+    N_SAMPLES,
+    _stft_power,
+    _stft_power_loop,
+    compute_features,
+    pad_or_trim,
+)
 from app.decode import (
     _HAS_AV,
     TranscriptSegment,
