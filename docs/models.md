@@ -1,15 +1,16 @@
 # Модели Whisper RKNN
 
-Проект рассчитан на **Whisper turbo**. По умолчанию — **гибрид**: encoder на NPU, decoder на CPU (ONNX). Файлы в каталоге, смонтированном в `/models`:
+Проект рассчитан на **Whisper turbo**. **Гибрид**: encoder на NPU (`encoder.rknn`), decoder на CPU (`decoder.onnx`). Файлы в каталоге, смонтированном в `/models`:
 
 | Файл | Переменная | Описание |
 |------|------------|----------|
 | `encoder.rknn` | `WHISPER_ENCODER` | Encoder RKNN (NPU) |
-| `decoder.onnx` | `WHISPER_DECODER` | Decoder ONNX (CPU), **по умолчанию** |
-| `decoder.rknn` | — | Decoder RKNN (fallback при `WHISPER_DECODER_BACKEND=rknn`) |
+| `decoder.onnx` | `WHISPER_DECODER` | Decoder ONNX (CPU) |
 | `tokens.txt` | `WHISPER_TOKENS` | Словарь токенов Whisper |
 
-Пути по умолчанию заданы в `docker-compose.yml` (`WHISPER_DECODER=/models/decoder.onnx`, `WHISPER_DECODER_BACKEND=onnx`).
+Пути по умолчанию: `docker-compose.yml` (`WHISPER_DECODER=/models/decoder.onnx`, `WHISPER_DECODER_BACKEND=onnx`).
+
+Репозиторий весов: [ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo).
 
 ## Каталог на хосте
 
@@ -46,19 +47,12 @@ docker compose up -d --force-recreate
 аудио → mel (CPU) → encoder.rknn (NPU) → cross_kv → decoder.onnx (CPU) → текст
 ```
 
-Полный RKNN (`decoder.rknn` на NPU) медленнее на autoregressive decode (~2× на turbo). ONNX decoder экспортирован из sherpa-onnx (тот же граф, что у `decoder.rknn`).
-
-Переключение:
+`decoder.onnx` экспортирован из sherpa-onnx (`export_onnx.py --model turbo`); autoregressive decode на CPU через ONNX Runtime (~2× быстрее, чем decoder на NPU).
 
 ```bash
-WHISPER_DECODER_BACKEND=onnx    # по умолчанию
+WHISPER_DECODER_BACKEND=onnx
 WHISPER_DECODER=/models/decoder.onnx
-
-WHISPER_DECODER_BACKEND=rknn      # fallback, только NPU
-WHISPER_DECODER=/models/decoder.rknn
 ```
-
-При `auto` выбирается `decoder.onnx`, если файл есть в `WHISPER_MODELS_DIR`.
 
 ## Длинное аудио
 
@@ -66,11 +60,9 @@ WHISPER_DECODER=/models/decoder.rknn
 
 По умолчанию overlap **2 с** — достаточно для стыковки фраз на границе окон. Уменьшить overlap (`0`) — быстрее, но выше риск обрезать слово на стыке.
 
-Для гибридного режима (NPU encoder + CPU ONNX decoder) в репозитории `sherpa-rknn-whisper-turbo` на Hugging Face лежит `decoder.onnx`; при `WHISPER_DOWNLOAD_MODELS=turbo` он скачивается вместе с `.rknn`.
-
 ## Автозагрузка turbo при старте
 
-По аналогии с [`video-descriptor-rkllm`](https://github.com/ShiWarai/video-descriptor-rkllm): opt-in через `WHISPER_DOWNLOAD_MODELS`. Скрипт [`scripts/download_models.sh`](../scripts/download_models.sh) качает только недостающие файлы с [Hugging Face ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo).
+По аналогии с [`video-descriptor-rkllm`](https://github.com/ShiWarai/video-descriptor-rkllm): opt-in через `WHISPER_DOWNLOAD_MODELS`. Скрипт [`scripts/download_models.sh`](../scripts/download_models.sh) качает только недостающие файлы с Hugging Face.
 
 ```bash
 WHISPER_DOWNLOAD_MODELS=turbo   # или 1
@@ -78,7 +70,7 @@ WHISPER_MODEL_PROFILE=turbo
 WHISPER_LANGUAGE=ru
 ```
 
-Entrypoint при автозагрузке выставляет `WHISPER_ENCODER`, `WHISPER_DECODER` (onnx), `WHISPER_DECODER_BACKEND=onnx`, `WHISPER_TOKENS`, `WHISPER_MODEL_PROFILE=turbo`.
+Entrypoint при автозагрузке выставляет `WHISPER_ENCODER`, `WHISPER_DECODER=/models/decoder.onnx`, `WHISPER_DECODER_BACKEND=onnx`, `WHISPER_TOKENS`, `WHISPER_MODEL_PROFILE=turbo`.
 
 Свои URL: `WHISPER_MODEL_URLS=имя_файла=https://...` (через запятую или с новой строки).
 
@@ -98,10 +90,10 @@ WHISPER_MODEL_PROFILE=turbo
 
 ## Совместимость toolchain
 
-1. Модели `.rknn` должны быть собраны toolchain, совместимым с `librknnrt.so` из [`third_party/`](../third_party/README.md).
+1. `encoder.rknn` должен быть собран toolchain, совместимым с `librknnrt.so` из [`third_party/`](../third_party/README.md).
 2. Целевая платформа inference: **RK3588** (`privileged: true` в compose для доступа к NPU).
 3. Версия `rknn_toolkit_lite2` / `librknnrt.so` в образе: **2.3.2** ([airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2), см. `Dockerfile`).
-4. Декод аудио: **PyAV** (libav API in-process, wheel в образе); fallback — CLI `ffmpeg` из `apt`. Устройства NPU в `docker-compose.yml` — для RKNN inference.
+4. Декод аудио: **PyAV** (libav API in-process, wheel в образе); fallback — CLI `ffmpeg` из `apt`. Устройства NPU в `docker-compose.yml` — для RKNN encoder.
 
 ## Раскладка файлов
 
@@ -109,6 +101,5 @@ WHISPER_MODEL_PROFILE=turbo
 /mnt/nvme0/models/whisper-rknn-turbo/
   encoder.rknn
   decoder.onnx
-  decoder.rknn
   tokens.txt
 ```

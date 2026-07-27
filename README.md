@@ -6,7 +6,7 @@
 ![Platform](https://img.shields.io/badge/platform-linux%2Farm64-orange.svg)
 ![Docker](https://img.shields.io/badge/docker-GHCR-blue.svg)
 
-Распознавание **Whisper turbo** на **Rockchip RK3588**: **NPU encoder** (`encoder.rknn`) + **CPU ONNX decoder** (`decoder.onnx`) через контейнер с **REST API**. Полный RKNN (`decoder.rknn`) остаётся как fallback. Единственный поддерживаемый способ запуска — Docker.
+Распознавание **Whisper turbo** на **Rockchip RK3588**: **NPU encoder** (`encoder.rknn`) + **CPU ONNX decoder** (`decoder.onnx`) через контейнер с **REST API**. Единственный поддерживаемый способ запуска — Docker.
 
 Репозиторий: [github.com/ShiWarai/whisper-rknn](https://github.com/ShiWarai/whisper-rknn)
 
@@ -91,7 +91,7 @@ WHISPER_LANGUAGE=ru
 WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
 ```
 
-Источник: [HF ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo) (`encoder.rknn`, `decoder.rknn`, `decoder.onnx`, `tokens.txt` — ~2.4 GB, скачивается один раз в volume).
+Источник: [HF ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo) (`encoder.rknn`, `decoder.onnx`, `tokens.txt` — ~2.0 GB).
 
 ### Продакшен (образ из GHCR)
 
@@ -118,7 +118,7 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
 | `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
 | `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
-| Каталог моделей на хосте | `encoder.rknn`, `decoder.onnx` (по умолчанию), `decoder.rknn` (fallback), `tokens.txt` |
+| Каталог моделей на хосте | `encoder.rknn`, `decoder.onnx`, `tokens.txt` |
 
 Версия **`librknnrt.so`** должна совпадать с toolchain, которым собраны `.rknn`. Подробнее: [docs/models.md](docs/models.md).
 
@@ -157,7 +157,7 @@ CPU-аналог: `hwdsl2/whisper-server` с тем же путём `/v1/audio/t
 |------------|--------------|-------|
 | `WHISPER_ENCODER` | `/models/encoder.rknn` | Encoder RKNN (NPU) |
 | `WHISPER_DECODER` | `/models/decoder.onnx` | Decoder (ONNX на CPU по умолчанию) |
-| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `rknn` / `auto` |
+| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `auto` (если есть `decoder.onnx`) |
 | `WHISPER_TOKENS` | `/models/tokens.txt` | Токены |
 | `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |

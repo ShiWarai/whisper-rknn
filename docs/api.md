@@ -137,7 +137,7 @@ data: [DONE]
 
 ## Inference
 
-По умолчанию **гибрид**: RKNN encoder на NPU, ONNX decoder на CPU (`onnxruntime`). Fallback: полный RKNN (`WHISPER_DECODER_BACKEND=rknn`).
+По умолчанию **гибрид**: RKNN encoder на NPU, ONNX decoder на CPU (`onnxruntime`).
 
 Декодирование останавливается по **EOT** или при заполнении KV (`n_text_ctx=448`). При обрыве длинного окна без EOT следующий chunk начинается раньше (adaptive seek).
 
@@ -156,7 +156,7 @@ data: [DONE]
 | `WHISPER_CHUNK_SECONDS` | ~30 | Длина окна (не больше 30) |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие окон |
 | `WHISPER_MIN_TAIL_SECONDS` | `8` | Хвост короче этого — одно финальное окно |
-| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `rknn` / `auto` |
+| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `auto` |
 | `WHISPER_DECODER` | `/models/decoder.onnx` | Путь к decoder (onnx или rknn) |
 | `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в `n_text_ctx`; число — мягкий потолок |
 | `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост |

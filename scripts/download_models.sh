@@ -3,7 +3,7 @@
 #
 # Presets (WHISPER_DOWNLOAD_MODELS or first argument):
 #   turbo | 1 — ShiWarai/sherpa-rknn-whisper-turbo on Hugging Face
-#     (encoder.rknn, decoder.rknn, decoder.onnx, tokens.txt)
+#     (encoder.rknn, decoder.onnx, tokens.txt)
 #
 # Custom URLs (WHISPER_MODEL_URLS), comma- or newline-separated:
 #   local_filename=https://host/path/file.rknn
@@ -21,10 +21,9 @@ declare -a WANT_LOCAL=()
 declare -a WANT_URL=()
 
 add_turbo() {
-  WANT_LOCAL+=("encoder.rknn" "decoder.rknn" "decoder.onnx" "tokens.txt")
+  WANT_LOCAL+=("encoder.rknn" "decoder.onnx" "tokens.txt")
   WANT_URL+=(
     "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/encoder.rknn"
-    "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/decoder.rknn"
     "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/decoder.onnx"
     "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/tokens.txt"
   )

@@ -35,7 +35,8 @@ COPY scripts/docker-entrypoint.sh scripts/download_models.sh ./scripts/
 RUN chmod +x ./scripts/docker-entrypoint.sh ./scripts/download_models.sh
 
 ENV WHISPER_ENCODER=/models/encoder.rknn \
-    WHISPER_DECODER=/models/decoder.rknn \
+    WHISPER_DECODER=/models/decoder.onnx \
+    WHISPER_DECODER_BACKEND=onnx \
     WHISPER_TOKENS=/models/tokens.txt \
     WHISPER_MODEL_PROFILE=turbo \
     PORT=8080 \
