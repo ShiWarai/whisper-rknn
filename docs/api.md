@@ -109,7 +109,7 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопр�
 |----------|-------|
 | `json` | `{"text": "..."}` |
 | `text` | plain text |
-| `verbose_json` | JSON с `task`, `language`, `duration`, `text`, `segments[]` |
+| `verbose_json` | JSON с `task`, `language`, `duration`, `text`, `segments[]`, `timings` (стадии decode) |
 | `srt` | SubRip |
 | `vtt` | WebVTT |
 
@@ -135,6 +135,12 @@ data: [DONE]
 
 Не поддерживается для English-only моделей (`.en`) — **400**.
 
+## Inference
+
+По умолчанию **гибрид**: RKNN encoder на NPU, ONNX decoder на CPU (`onnxruntime`). Fallback: полный RKNN (`WHISPER_DECODER_BACKEND=rknn`).
+
+Декодирование останавливается по **EOT** или при заполнении KV (`n_text_ctx=448`). При обрыве длинного окна без EOT следующий chunk начинается раньше (adaptive seek).
+
 ## Защита от OOM (RAM)
 
 Перед декодированием сервис сравнивает оценку пика RAM с **`MemAvailable`**. При нехватке — **507**.
@@ -150,8 +156,13 @@ data: [DONE]
 | `WHISPER_CHUNK_SECONDS` | ~30 | Длина окна (не больше 30) |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие окон |
 | `WHISPER_MIN_TAIL_SECONDS` | `8` | Хвост короче этого — одно финальное окно |
-| `WHISPER_DECODER_BACKEND` | `auto` | `onnx` / `rknn` / `auto` (onnx если есть `decoder.onnx`) |
+| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `rknn` / `auto` |
+| `WHISPER_DECODER` | `/models/decoder.onnx` | Путь к decoder (onnx или rknn) |
+| `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в `n_text_ctx`; число — мягкий потолок |
+| `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост |
 | `WHISPER_MAX_NGRAM_REPEAT` | `6` | Стоп при зацикливании токенов |
+
+Поле `timings` в `verbose_json` (и в логах API): `audio_ms`, `mel_ms`, `encoder_ms`, `decoder_ms`, `tokens`, `decoder_calls`, `chunks`, `wall_ms`, `rtf`, `decoder_backend`, `truncated`.
 
 ## Ошибки
 

@@ -1,14 +1,15 @@
 # Модели Whisper RKNN
 
-Проект рассчитан на **Whisper turbo** (RKNN). Три файла в каталоге, смонтированном в `/models`:
+Проект рассчитан на **Whisper turbo**. По умолчанию — **гибрид**: encoder на NPU, decoder на CPU (ONNX). Файлы в каталоге, смонтированном в `/models`:
 
 | Файл | Переменная | Описание |
 |------|------------|----------|
-| `encoder.rknn` | `WHISPER_ENCODER` | Encoder RKNN |
-| `decoder.rknn` | `WHISPER_DECODER` | Decoder RKNN |
+| `encoder.rknn` | `WHISPER_ENCODER` | Encoder RKNN (NPU) |
+| `decoder.onnx` | `WHISPER_DECODER` | Decoder ONNX (CPU), **по умолчанию** |
+| `decoder.rknn` | — | Decoder RKNN (fallback при `WHISPER_DECODER_BACKEND=rknn`) |
 | `tokens.txt` | `WHISPER_TOKENS` | Словарь токенов Whisper |
 
-Пути по умолчанию заданы в `Dockerfile` и `docker-compose.yml`.
+Пути по умолчанию заданы в `docker-compose.yml` (`WHISPER_DECODER=/models/decoder.onnx`, `WHISPER_DECODER_BACKEND=onnx`).
 
 ## Каталог на хосте
 
@@ -39,6 +40,26 @@ docker compose up -d --force-recreate
 
 Коды — как в [Whisper](https://github.com/openai/whisper) (`ru`, `en`, `uk`, `de`, `zh`, …).
 
+## Гибрид NPU + CPU
+
+```
+аудио → mel (CPU) → encoder.rknn (NPU) → cross_kv → decoder.onnx (CPU) → текст
+```
+
+Полный RKNN (`decoder.rknn` на NPU) медленнее на autoregressive decode (~2× на turbo). ONNX decoder экспортирован из sherpa-onnx (тот же граф, что у `decoder.rknn`).
+
+Переключение:
+
+```bash
+WHISPER_DECODER_BACKEND=onnx    # по умолчанию
+WHISPER_DECODER=/models/decoder.onnx
+
+WHISPER_DECODER_BACKEND=rknn      # fallback, только NPU
+WHISPER_DECODER=/models/decoder.rknn
+```
+
+При `auto` выбирается `decoder.onnx`, если файл есть в `WHISPER_MODELS_DIR`.
+
 ## Длинное аудио
 
 Окно encoder RKNN фиксировано (~30 с). Для подкастов, длинных голосовых и т.п. включена **нарезка с overlap** и склейка текста (см. [docs/api.md](api.md#длинное-аудио-30-с)).
@@ -57,7 +78,7 @@ WHISPER_MODEL_PROFILE=turbo
 WHISPER_LANGUAGE=ru
 ```
 
-Entrypoint выставляет `WHISPER_ENCODER` / `WHISPER_DECODER` / `WHISPER_TOKENS` и `WHISPER_MODEL_PROFILE=turbo`.
+Entrypoint при автозагрузке выставляет `WHISPER_ENCODER`, `WHISPER_DECODER` (onnx), `WHISPER_DECODER_BACKEND=onnx`, `WHISPER_TOKENS`, `WHISPER_MODEL_PROFILE=turbo`.
 
 Свои URL: `WHISPER_MODEL_URLS=имя_файла=https://...` (через запятую или с новой строки).
 
@@ -87,6 +108,7 @@ WHISPER_MODEL_PROFILE=turbo
 ```
 /mnt/nvme0/models/whisper-rknn-turbo/
   encoder.rknn
+  decoder.onnx
   decoder.rknn
   tokens.txt
 ```

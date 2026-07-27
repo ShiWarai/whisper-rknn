@@ -6,7 +6,7 @@
 ![Platform](https://img.shields.io/badge/platform-linux%2Farm64-orange.svg)
 ![Docker](https://img.shields.io/badge/docker-GHCR-blue.svg)
 
-Распознавание **Whisper** в формате **RKNN** (`encoder.rknn` + `decoder.rknn`) на **Rockchip RK3588** через контейнер с **REST API**. Единственный поддерживаемый способ запуска — Docker; локальный CLI не используется.
+Распознавание **Whisper turbo** на **Rockchip RK3588**: **NPU encoder** (`encoder.rknn`) + **CPU ONNX decoder** (`decoder.onnx`) через контейнер с **REST API**. Полный RKNN (`decoder.rknn`) остаётся как fallback. Единственный поддерживаемый способ запуска — Docker.
 
 Репозиторий: [github.com/ShiWarai/whisper-rknn](https://github.com/ShiWarai/whisper-rknn)
 
@@ -14,7 +14,7 @@
 
 | Категория | Технологии |
 |-----------|------------|
-| Inference | RKNN Toolkit Lite 2, `librknnrt`, numpy mel (без PyTorch) |
+| Inference | RKNN Toolkit Lite 2 (encoder NPU), ONNX Runtime CPU (decoder), numpy mel |
 | API | FastAPI, Uvicorn |
 | Аудио | PyAV (libav in-process), soundfile/kaldi_native_fbank |
 | Инфраструктура | Docker, Docker Compose, GHCR |
@@ -27,7 +27,7 @@
 |--------|------------|
 | [Быстрый старт](#быстрый-старт) | Запуск за 3 шага |
 | [Установка и запуск](#установка-и-запуск) | Локальная сборка, prod/prerelease из GHCR |
-| [Модели и third_party](#модели-и-third_party) | Файлы `.rknn`, SDK в репозитории |
+| [Модели и third_party](#модели-и-third_party) | `.rknn`, `decoder.onnx`, SDK |
 | [API](#api) | Эндпоинты |
 | [Структура проекта](#структура-проекта) | Дерево каталогов |
 | [Тестирование](#тестирование) | ruff, pytest в dev-контейнере |
@@ -91,7 +91,7 @@ WHISPER_LANGUAGE=ru
 WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
 ```
 
-Источник: [HF ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo) (~1.8 GB, скачивается один раз в volume).
+Источник: [HF ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo) (`encoder.rknn`, `decoder.rknn`, `decoder.onnx`, `tokens.txt` — ~2.4 GB, скачивается один раз в volume).
 
 ### Продакшен (образ из GHCR)
 
@@ -118,7 +118,7 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 | `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
 | `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
 | `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
-| Каталог моделей на хосте | `encoder.rknn`, `decoder.rknn`, `tokens.txt` |
+| Каталог моделей на хосте | `encoder.rknn`, `decoder.onnx` (по умолчанию), `decoder.rknn` (fallback), `tokens.txt` |
 
 Версия **`librknnrt.so`** должна совпадать с toolchain, которым собраны `.rknn`. Подробнее: [docs/models.md](docs/models.md).
 
@@ -155,8 +155,9 @@ CPU-аналог: `hwdsl2/whisper-server` с тем же путём `/v1/audio/t
 
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|-------|
-| `WHISPER_ENCODER` | `/models/encoder.rknn` | Encoder внутри контейнера |
-| `WHISPER_DECODER` | `/models/decoder.rknn` | Decoder |
+| `WHISPER_ENCODER` | `/models/encoder.rknn` | Encoder RKNN (NPU) |
+| `WHISPER_DECODER` | `/models/decoder.onnx` | Decoder (ONNX на CPU по умолчанию) |
+| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `rknn` / `auto` |
 | `WHISPER_TOKENS` | `/models/tokens.txt` | Токены |
 | `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
@@ -173,7 +174,8 @@ CPU-аналог: `hwdsl2/whisper-server` с тем же путём `/v1/audio/t
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
 | `WHISPER_MIN_TAIL_SECONDS` | `8` | Короткий хвост не гоняется отдельным окном |
-| `WHISPER_DECODER_BACKEND` | `auto` | CPU ONNX decoder при наличии `decoder.onnx` |
+| `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в пределах `n_text_ctx` (448); число — мягкий потолок |
+| `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост в следующем окне |
 | `WHISPER_MAX_NGRAM_REPEAT` | `6` | Остановка при зацикливании n-грамм в декодере |
 
 ---
@@ -186,7 +188,8 @@ whisper-rknn/
 │   ├── api_server.py         # OpenAI-compatible FastAPI
 │   ├── openai_response.py    # response_format / SSE helpers
 │   ├── system_memory.py      # MemAvailable RAM forecast
-│   ├── decode.py             # RKNN encoder/decoder, chunking
+│   ├── decode.py             # RKNN encoder, chunking, decode loop
+│   ├── onnx_decoder.py       # CPU ONNX decoder (hybrid)
 │   ├── audio_features.py     # mel-спектрограмма (numpy + knf)
 │   ├── whisper_languages.py  # language token ids без openai-whisper
 │   └── assets/
