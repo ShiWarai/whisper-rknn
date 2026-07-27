@@ -27,6 +27,7 @@ from app.decode import (
     load_audio_16k_mono,
     load_tokens,
     model_config_from_encoder_path,
+    resolve_decoder_backend,
     resolve_librknnrt_path,
     stitch_transcripts,
 )
@@ -68,6 +69,7 @@ _restore_std_log_levels()
 
 _encoder_path = os.environ.get("WHISPER_ENCODER", "")
 _decoder_path = os.environ.get("WHISPER_DECODER", "")
+_decoder_backend = os.environ.get("WHISPER_DECODER_BACKEND", "auto")
 _tokens_path = os.environ.get("WHISPER_TOKENS", "")
 _host = os.environ.get("HOST", "0.0.0.0")
 _port = int(os.environ.get("PORT", "8080"))
@@ -151,13 +153,19 @@ def _load_model_sync() -> None:
 
     for name, path in (
         ("WHISPER_ENCODER", _encoder_path),
-        ("WHISPER_DECODER", _decoder_path),
         ("WHISPER_TOKENS", _tokens_path),
     ):
         if not path or not Path(path).is_file():
             raise FileNotFoundError(f"{name} must point to an existing file: {path!r}")
 
-    model_ram_need = estimate_model_ram_bytes(_encoder_path, _decoder_path)
+    backend, resolved_decoder = resolve_decoder_backend(
+        backend=_decoder_backend,
+        decoder_path=_decoder_path or None,
+        models_dir=os.environ.get("WHISPER_MODELS_DIR"),
+    )
+    print(f"decoder: backend={backend} path={resolved_decoder}")
+
+    model_ram_need = estimate_model_ram_bytes(_encoder_path, resolved_decoder)
     ok, reason = has_enough_ram(model_ram_need, context="model RSS")
     print(model_ram_check_message(model_ram_need))
     if not ok:
@@ -179,7 +187,7 @@ def _load_model_sync() -> None:
     _model_name = _active_model_name()
     _model = RKNNModel(
         encoder=_encoder_path,
-        decoder=_decoder_path,
+        decoder=resolved_decoder,
         size_key=size_key,
         english_only=english_only,
         eot=eot,
@@ -191,6 +199,7 @@ def _load_model_sync() -> None:
         notimestamps_id=notimestamps_id,
         timestamp_begin=timestamp_begin,
         verbose=False,
+        decoder_backend=backend,
     )
     from app.auth import auth_enabled
 
@@ -388,7 +397,10 @@ async def _handle_audio(
                 timestamps=timestamps,
                 task=task,
                 language=resolved_lang,
+                collect_timings=True,
             )
+            if result.timings is not None:
+                logger.info("decode timings: %s", result.timings.to_dict())
             return result, duration
 
         try:

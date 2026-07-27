@@ -73,6 +73,12 @@ def verbose_json_payload(
     }
 
 
+def timings_payload(result: DecodeResult) -> Optional[dict]:
+    if result.timings is None:
+        return None
+    return result.timings.to_dict()
+
+
 def format_transcription_response(
     result: DecodeResult,
     *,
@@ -97,6 +103,9 @@ def format_transcription_response(
         payload = verbose_json_payload(
             result, task=task, language=language, duration=duration
         )
+        stage_timings = timings_payload(result)
+        if stage_timings is not None:
+            payload["timings"] = stage_timings
         return json.dumps(payload, ensure_ascii=False), "application/json"
 
     return json.dumps({"text": result.text}, ensure_ascii=False), "application/json"

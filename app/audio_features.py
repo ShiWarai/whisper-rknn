@@ -43,8 +43,8 @@ def pad_or_trim(
     return array
 
 
-def _stft_power(audio: np.ndarray) -> np.ndarray:
-    """Power spectrum matching ``torch.stft`` + ``[..., :-1]`` (shape: n_fft//2 × T)."""
+def _stft_power_loop(audio: np.ndarray) -> np.ndarray:
+    """Reference STFT (loop); kept for regression tests."""
     window = np.hanning(N_FFT).astype(np.float32)
     pad = N_FFT // 2
     audio = np.pad(audio.astype(np.float32, copy=False), (pad, pad), mode="reflect")
@@ -56,6 +56,25 @@ def _stft_power(audio: np.ndarray) -> np.ndarray:
         frame = audio[start : start + N_FFT] * window
         spectrum = np.fft.rfft(frame, n=N_FFT)
         power[:, i] = np.abs(spectrum[:-1]) ** 2
+    return power
+
+
+def _stft_power(audio: np.ndarray) -> np.ndarray:
+    """Power spectrum matching ``torch.stft`` + ``[..., :-1]`` (shape: n_fft//2 × T)."""
+    window = np.hanning(N_FFT).astype(np.float32)
+    pad = N_FFT // 2
+    audio = np.pad(audio.astype(np.float32, copy=False), (pad, pad), mode="reflect")
+    n_frames = 1 + (len(audio) - N_FFT) // HOP_LENGTH
+    n_bins = N_FFT // 2
+    if n_frames <= 0:
+        return np.zeros((n_bins, 0), dtype=np.float32)
+
+    shape = (n_frames, N_FFT)
+    strides = (HOP_LENGTH * audio.strides[0], audio.strides[0])
+    frames = np.lib.stride_tricks.as_strided(audio, shape=shape, strides=strides)
+    frames = frames * window
+    spectrum = np.fft.rfft(frames, n=N_FFT, axis=1)
+    power = (np.abs(spectrum[:, :-1]) ** 2).T.astype(np.float32)
     return power
 
 

@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Callable, Iterator, List, Literal, Optional, Tuple, Union
@@ -24,6 +25,7 @@ import numpy as np
 import soundfile as sf
 
 from app.audio_features import compute_features
+from app.onnx_decoder import OnnxDecoder, resolve_decoder_backend
 from app.whisper_languages import language_token_id
 
 TaskType = Literal["transcribe", "translate"]
@@ -39,9 +41,56 @@ class TranscriptSegment:
 
 
 @dataclass
+class DecodeTimings:
+    """Per-utterance stage timings (milliseconds unless noted)."""
+
+    audio_ms: float = 0.0
+    mel_ms: float = 0.0
+    encoder_ms: float = 0.0
+    decoder_ms: float = 0.0
+    tokens: int = 0
+    decoder_calls: int = 0
+    chunks: int = 1
+    wall_ms: float = 0.0
+    rtf: float = 0.0
+    decoder_backend: str = "rknn"
+    truncated: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "audio_ms": round(self.audio_ms, 2),
+            "mel_ms": round(self.mel_ms, 2),
+            "encoder_ms": round(self.encoder_ms, 2),
+            "decoder_ms": round(self.decoder_ms, 2),
+            "tokens": self.tokens,
+            "decoder_calls": self.decoder_calls,
+            "chunks": self.chunks,
+            "wall_ms": round(self.wall_ms, 2),
+            "rtf": round(self.rtf, 4),
+            "decoder_backend": self.decoder_backend,
+            "truncated": self.truncated,
+        }
+
+    def merge(self, other: "DecodeTimings") -> None:
+        self.audio_ms += other.audio_ms
+        self.mel_ms += other.mel_ms
+        self.encoder_ms += other.encoder_ms
+        self.decoder_ms += other.decoder_ms
+        self.tokens += other.tokens
+        self.decoder_calls += other.decoder_calls
+        self.chunks += other.chunks
+        self.wall_ms += other.wall_ms
+        self.truncated = self.truncated or other.truncated
+        if other.decoder_backend and other.decoder_backend != self.decoder_backend:
+            self.decoder_backend = other.decoder_backend
+
+
+@dataclass
 class DecodeResult:
     text: str
     segments: Optional[List[TranscriptSegment]] = None
+    timings: Optional[DecodeTimings] = None
+    truncated: bool = False
 
 try:
     import av
@@ -460,6 +509,7 @@ class RKNNModel:
         timestamp_begin: Optional[int] = None,
         target_platform="rk3588",
         verbose: bool = True,
+        decoder_backend: Optional[str] = None,
     ):
         self.size_key = size_key
         self.english_only = english_only
@@ -472,15 +522,28 @@ class RKNNModel:
         self.notimestamps_id = notimestamps_id
         self.timestamp_begin = timestamp_begin
 
+        backend, decoder_path = resolve_decoder_backend(
+            backend=decoder_backend,
+            decoder_path=decoder,
+        )
+        self.decoder_backend = backend
+        self.decoder_path = decoder_path
+
         core_mask = resolve_npu_core_mask()
         if verbose:
             print("model_size", self.size_key, "english_only", self.english_only)
             print("eot", self.eot)
             print("timestamp_begin", self.timestamp_begin)
             print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
+            print("decoder_backend", self.decoder_backend, self.decoder_path)
 
         self.encoder = init_model(encoder, core_mask=core_mask)
-        self.decoder = init_model(decoder, core_mask=core_mask)
+        self._onnx_decoder: Optional[OnnxDecoder] = None
+        self.decoder = None
+        if self.decoder_backend == "onnx":
+            self._onnx_decoder = OnnxDecoder(decoder_path, n_text_layer=n_text_layer)
+        else:
+            self.decoder = init_model(decoder_path, core_mask=core_mask)
 
     def sot_sequence_for(
         self,
@@ -501,7 +564,10 @@ class RKNNModel:
 
     def release(self):
         self.encoder.release()
-        self.decoder.release()
+        if self.decoder is not None:
+            self.decoder.release()
+        if self._onnx_decoder is not None:
+            self._onnx_decoder.release()
 
     def run_encoder(self, x):
         arr = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
@@ -521,6 +587,9 @@ class RKNNModel:
         return self_cache
 
     def run_decoder(self, tokens: np.ndarray, self_kv, cross_kv, offset, mask):
+        if self._onnx_decoder is not None:
+            return self._onnx_decoder.run(tokens, self_kv, cross_kv, offset, mask)
+        assert self.decoder is not None
         return self.decoder.inference(
             inputs=[tokens] + self_kv + cross_kv + [offset, mask]
         )
@@ -530,6 +599,35 @@ def whisper_window_samples(sample_rate: int = 16000, mel_time_frames: int = 3000
     """Samples per model window (~30 s for mel_time_frames=3000 @ 100 frames/s)."""
     seconds = float(mel_time_frames) / 100.0
     return max(1, int(round(seconds * sample_rate)))
+
+
+def _min_tail_samples(sample_rate: int = 16000) -> int:
+    raw = os.environ.get("WHISPER_MIN_TAIL_SECONDS", "8").strip()
+    try:
+        sec = float(raw)
+    except ValueError:
+        sec = 8.0
+    if sec <= 0:
+        return 0
+    return max(0, int(round(sec * sample_rate)))
+
+
+def _merge_short_tail_spans(
+    spans: List[Tuple[int, np.ndarray]],
+    samples: np.ndarray,
+    chunk_samples: int,
+    *,
+    min_tail_samples: int,
+) -> List[Tuple[int, np.ndarray]]:
+    """Replace a tiny trailing window with one final full-size slice."""
+    if min_tail_samples <= 0 or len(spans) <= 1:
+        return spans
+    last_start, last_chunk = spans[-1]
+    if len(last_chunk) >= min_tail_samples:
+        return spans
+    n = int(samples.shape[0])
+    final_start = max(0, n - chunk_samples)
+    return spans[:-1] + [(final_start, samples[final_start:n])]
 
 
 def iter_audio_chunk_spans(
@@ -694,27 +792,45 @@ def decode_samples(
     time_offset: float = 0.0,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
+    collect_timings: bool = False,
 ) -> DecodeResult:
     """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
+    timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
+    wall_t0 = time.perf_counter()
+
+    mel_t0 = time.perf_counter()
     features = compute_features(
         samples,
         n_mels=model.n_mels,
         target_frames=model.mel_time_frames,
     )
+    if timings is not None:
+        timings.mel_ms = (time.perf_counter() - mel_t0) * 1000.0
+
     if verbose:
         print(features.shape)
+
+    enc_t0 = time.perf_counter()
     cross_kv = model.run_encoder(features)
+    if timings is not None:
+        timings.encoder_ms = (time.perf_counter() - enc_t0) * 1000.0
+
     self_kv = model.get_self_cache()
 
     sot = model.sot_sequence_for(timestamps, task=task, language=language)
     offset = np.array([0], dtype=np.int32)
     out = None
+    decoder_calls = 0
     for t in sot:
         token = np.array([[t]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
+        dec_t0 = time.perf_counter()
         out = model.run_decoder(
             tokens=token, self_kv=self_kv, cross_kv=cross_kv, offset=offset, mask=mask
         )
+        if timings is not None:
+            timings.decoder_ms += (time.perf_counter() - dec_t0) * 1000.0
+        decoder_calls += 1
         for i in range(1, len(out)):
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
@@ -727,9 +843,9 @@ def decode_samples(
     idx = int(logits.argmax())
     ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
-    max_tokens = int(
-        os.environ.get("WHISPER_MAX_DECODE_TOKENS", "150" if timestamps else "100")
-    )
+    # Stop on EOT; hard ceiling is KV context (n_text_ctx). Optional soft cap via env.
+    stop_at = resolve_decode_token_limit(model.n_text_ctx)
+    stopped_on_repeat = False
 
     def _repeating_tail(tokens: List[int]) -> bool:
         """Stop if the same 1–4 token pattern repeats at the end."""
@@ -748,9 +864,10 @@ def decode_samples(
                 return True
         return False
 
-    while idx != model.eot and offset.item() < max_tokens:
+    while idx != model.eot and offset.item() < stop_at:
         ans.append(int(idx))
         if _repeating_tail(ans):
+            stopped_on_repeat = True
             for n in (1, 2, 3, 4):
                 need = n * max_ngram_repeats
                 if len(ans) >= need and ans[-n:] * max_ngram_repeats == ans[-need:]:
@@ -759,13 +876,29 @@ def decode_samples(
             break
         token = np.array([[idx]], dtype=np.int32)
         mask = causal_mask_1d(offset.item(), model.n_text_ctx)
+        dec_t0 = time.perf_counter()
         out = model.run_decoder(
             tokens=token, self_kv=self_kv, cross_kv=cross_kv, offset=offset, mask=mask
         )
+        if timings is not None:
+            timings.decoder_ms += (time.perf_counter() - dec_t0) * 1000.0
+        decoder_calls += 1
         for i in range(1, len(out)):
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
         idx = int(out[0][0, 0].argmax())
+
+    truncated = idx != model.eot and not stopped_on_repeat and offset.item() >= stop_at
+    if timings is not None:
+        timings.tokens = len(ans)
+        timings.decoder_calls = decoder_calls
+        timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+        timings.truncated = truncated
+    if truncated and verbose:
+        print(
+            f"decode truncated: offset={offset.item()} stop_at={stop_at} "
+            f"n_text_ctx={model.n_text_ctx} (no EOT)"
+        )
 
     if verbose:
         print(ans)
@@ -783,11 +916,42 @@ def decode_samples(
 
     if verbose:
         print(text)
-    return DecodeResult(text=text, segments=segments)
+    return DecodeResult(text=text, segments=segments, timings=timings, truncated=truncated)
 
 
-def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[Tuple[int, np.ndarray]], int, int]:
-    """Return chunk spans plus hop/overlap sample counts for timestamp trimming."""
+def resolve_decode_token_limit(n_text_ctx: int) -> int:
+    """
+    Hard stop for autoregressive decode.
+
+    Default ``0`` / ``auto`` → model context ``n_text_ctx`` (stop on EOT or full KV).
+    A positive ``WHISPER_MAX_DECODE_TOKENS`` is an optional soft cap (clamped to ctx).
+    """
+    raw = os.environ.get("WHISPER_MAX_DECODE_TOKENS", "0").strip().lower()
+    if raw in ("", "0", "auto", "ctx", "full"):
+        return int(n_text_ctx)
+    try:
+        n = int(raw)
+    except ValueError:
+        return int(n_text_ctx)
+    if n <= 0:
+        return int(n_text_ctx)
+    return min(n, int(n_text_ctx))
+
+
+def _truncate_retry_samples(sample_rate: int = 16000) -> int:
+    """Extra overlap when a window stops without EOT (re-hear the tail)."""
+    raw = os.environ.get("WHISPER_TRUNCATE_RETRY_SECONDS", "10").strip()
+    try:
+        sec = float(raw)
+    except ValueError:
+        sec = 10.0
+    if sec <= 0:
+        return 0
+    return max(0, int(round(sec * sample_rate)))
+
+
+def _utterance_window_params(model: RKNNModel) -> Tuple[int, int, int]:
+    """Return ``(sample_rate, chunk_samples, overlap_samples)``."""
     sample_rate = 16000
     chunk_samples = whisper_window_samples(sample_rate, model.mel_time_frames)
     env_sec = os.environ.get("WHISPER_CHUNK_SECONDS", "").strip()
@@ -802,7 +966,7 @@ def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[
             pass
 
     overlap_samples = 0
-    env_ov = os.environ.get("WHISPER_CHUNK_OVERLAP_SECONDS", "5").strip()
+    env_ov = os.environ.get("WHISPER_CHUNK_OVERLAP_SECONDS", "2").strip()
     if env_ov:
         try:
             ov_sec = float(env_ov)
@@ -813,9 +977,73 @@ def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[
                 )
         except ValueError:
             pass
+    return sample_rate, chunk_samples, overlap_samples
 
+
+def _next_chunk_start(
+    *,
+    start: int,
+    end: int,
+    n: int,
+    hop: int,
+    overlap_samples: int,
+    chunk_samples: int,
+    sample_rate: int,
+    truncated: bool,
+    segments: Optional[List[TranscriptSegment]],
+    timestamps: bool,
+) -> int:
+    """
+    Advance sliding window. If decode stopped without EOT, pull next start back
+    so the unfinished tail is re-decoded (Whisper-style seek without full VAD).
+    With timestamps, seek from the last segment end when available.
+    """
+    if end >= n:
+        return n
+
+    if timestamps and segments:
+        last_end = max((s.end for s in segments), default=None)
+        if last_end is not None and last_end > 0:
+            seek = int(round(last_end * sample_rate))
+            lookback = max(overlap_samples, int(0.5 * sample_rate))
+            nxt = max(start + max(hop // 4, 1), seek - lookback)
+            return _maybe_merge_short_tail(nxt, n, chunk_samples, sample_rate)
+
+    if truncated:
+        retry = _truncate_retry_samples(sample_rate)
+        pullback = max(overlap_samples, retry)
+        advance = max(hop // 2, 1)
+        nxt = max(start + advance, end - pullback)
+    else:
+        nxt = start + hop
+
+    return _maybe_merge_short_tail(nxt, n, chunk_samples, sample_rate)
+
+
+def _maybe_merge_short_tail(
+    nxt: int, n: int, chunk_samples: int, sample_rate: int
+) -> int:
+    """If the remaining tail after ``nxt`` is tiny, snap to a final full window."""
+    if nxt >= n:
+        return n
+    remaining = n - nxt
+    min_tail = _min_tail_samples(sample_rate)
+    if 0 < remaining < min_tail:
+        return max(0, n - chunk_samples)
+    return nxt
+
+
+def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[Tuple[int, np.ndarray]], int, int]:
+    """Return chunk spans plus hop/overlap sample counts for timestamp trimming."""
+    sample_rate, chunk_samples, overlap_samples = _utterance_window_params(model)
     spans = iter_audio_chunk_spans(
         samples, chunk_samples, overlap_samples=overlap_samples
+    )
+    spans = _merge_short_tail_spans(
+        spans,
+        samples,
+        chunk_samples,
+        min_tail_samples=_min_tail_samples(sample_rate),
     )
     hop = chunk_samples - overlap_samples if overlap_samples else chunk_samples
     return spans, hop, sample_rate
@@ -831,36 +1059,65 @@ def decode_utterance(
     task: TaskType = "transcribe",
     language: Optional[str] = None,
     on_chunk: Optional[Callable[[DecodeResult], None]] = None,
+    collect_timings: bool = False,
 ) -> DecodeResult:
     """
     Full utterance: if longer than the model window (~30 s / 3000 mel), split into
     sliding chunks of that window size (optional overlap), decode each, stitch text.
 
+    Decode stops on EOT (or model ``n_text_ctx``). If a non-final window exits
+    without EOT, the next window starts earlier so the unfinished tail is re-heard.
+
     ``audio`` may be 16 kHz mono float32 samples or a path/bytes source for decoding.
     When ``timestamps`` is True, returns segment spans for LLM/video alignment.
     """
+    wall_t0 = time.perf_counter()
+    timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
+
+    audio_t0 = time.perf_counter()
     if isinstance(audio, np.ndarray):
         samples = np.ascontiguousarray(audio, dtype=np.float32)
     else:
         samples = load_audio_16k_mono(audio)
+    if timings is not None:
+        timings.audio_ms = (time.perf_counter() - audio_t0) * 1000.0
 
-    spans, hop, sample_rate = _utterance_chunk_spans(model, samples)
-    if verbose or len(spans) > 1:
-        dur_s = len(samples) / float(sample_rate)
+    sample_rate, chunk_samples, overlap_samples = _utterance_window_params(model)
+    hop = chunk_samples - overlap_samples if overlap_samples else chunk_samples
+    min_tail = _min_tail_samples(sample_rate)
+    n = int(samples.shape[0])
+
+    if verbose or n > chunk_samples:
+        dur_s = n / float(sample_rate)
         print(
-            f"audio_chunks={len(spans)} duration_s={dur_s:.2f} "
-            f"window_s={spans[0][1].shape[0] / sample_rate if spans else 0:.2f} "
+            f"audio_duration_s={dur_s:.2f} window_s={chunk_samples / sample_rate:.2f} "
+            f"overlap_s={overlap_samples / sample_rate:.2f} "
             f"timestamps={timestamps} task={task}"
         )
 
     parts: List[str] = []
     all_segments: List[TranscriptSegment] = []
-    for i, (start_sample, chunk) in enumerate(spans):
-        if verbose and len(spans) > 1:
+    start = 0
+    chunk_i = 0
+    any_truncated = False
+    max_chunks = max(1, (n // max(hop // 2, 1)) + 8)
+
+    while start < n and chunk_i < max_chunks:
+        remaining = n - start
+        if remaining <= chunk_samples:
+            if chunk_i > 0 and remaining < min_tail:
+                start = max(0, n - chunk_samples)
+            end = n
+        else:
+            end = start + chunk_samples
+
+        chunk = samples[start:end]
+        if verbose and (n > chunk_samples or chunk_i > 0):
             print(
-                f"chunk {i + 1}/{len(spans)} samples={len(chunk)} start={start_sample}"
+                f"chunk {chunk_i + 1} samples={len(chunk)} "
+                f"start={start} ({start / sample_rate:.2f}s)"
             )
-        time_offset = start_sample / float(sample_rate)
+        time_offset = start / float(sample_rate)
         result = decode_samples(
             model,
             id2token,
@@ -870,19 +1127,64 @@ def decode_utterance(
             time_offset=time_offset,
             task=task,
             language=language,
+            collect_timings=collect_timings,
         )
+        chunk_truncated = result.truncated
+        any_truncated = any_truncated or chunk_truncated
+        if timings is not None and result.timings is not None:
+            chunk_timings = result.timings
+            timings.mel_ms += chunk_timings.mel_ms
+            timings.encoder_ms += chunk_timings.encoder_ms
+            timings.decoder_ms += chunk_timings.decoder_ms
+            timings.tokens += chunk_timings.tokens
+            timings.decoder_calls += chunk_timings.decoder_calls
+            timings.truncated = timings.truncated or chunk_timings.truncated
+        elif timings is not None and chunk_truncated:
+            timings.truncated = True
+
         if on_chunk is not None and result.text:
             on_chunk(result)
+
+        next_start = _next_chunk_start(
+            start=start,
+            end=end,
+            n=n,
+            hop=hop,
+            overlap_samples=overlap_samples,
+            chunk_samples=chunk_samples,
+            sample_rate=sample_rate,
+            truncated=chunk_truncated,
+            segments=result.segments,
+            timestamps=timestamps,
+        )
+
         if timestamps and result.segments is not None:
             segs = result.segments
-            if i < len(spans) - 1:
-                boundary = (start_sample + hop) / float(sample_rate)
+            if next_start < n:
+                boundary = next_start / float(sample_rate)
                 segs = [s for s in segs if s.start < boundary]
             all_segments.extend(segs)
             if result.text:
                 parts.append(result.text)
         elif result.text:
             parts.append(result.text)
+
+        if chunk_truncated and next_start < n and verbose:
+            print(
+                f"truncate-retry: next_start={next_start} "
+                f"({next_start / sample_rate:.2f}s)"
+            )
+
+        if next_start <= start and end >= n:
+            break
+        if next_start <= start:
+            next_start = min(n, start + max(hop // 2, 1))
+        start = next_start
+        chunk_i += 1
+
+    if timings is not None:
+        timings.chunks = chunk_i
+        timings.truncated = timings.truncated or any_truncated
 
     if timestamps:
         text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(
@@ -893,9 +1195,21 @@ def decode_utterance(
         text = stitch_transcripts(parts)
         segments = None
 
-    if verbose and len(spans) > 1:
+    if verbose and chunk_i > 1:
         print(text)
-    return DecodeResult(text=text, segments=segments)
+
+    if timings is not None:
+        timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+        duration_s = n / float(sample_rate)
+        if duration_s > 0:
+            timings.rtf = (timings.wall_ms / 1000.0) / duration_s
+
+    return DecodeResult(
+        text=text,
+        segments=segments,
+        timings=timings,
+        truncated=any_truncated,
+    )
 
 
 def decode_utterance_stream(

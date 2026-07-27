@@ -5,17 +5,21 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.audio_features import N_SAMPLES, compute_features, pad_or_trim
+from app.audio_features import N_SAMPLES, _stft_power, _stft_power_loop, compute_features, pad_or_trim
 from app.decode import (
     _HAS_AV,
     TranscriptSegment,
+    _merge_short_tail_spans,
+    _next_chunk_start,
     build_sot_sequence,
     causal_mask_1d,
+    iter_audio_chunk_spans,
     iter_audio_chunks,
     load_audio_16k_mono,
     model_config_from_encoder_path,
     parse_timestamp_tokens,
     resample_linear,
+    resolve_decode_token_limit,
     stitch_transcripts,
     whisper_window_samples,
 )
@@ -130,19 +134,96 @@ def test_iter_audio_chunks_splits_long():
 
 
 def test_iter_audio_chunks_overlap_keeps_window_size():
-    # 47.7 s, window 30 s, overlap 5 s → hop 25 s → two windows, each ≤ 30 s
+    # 47.7 s, window 30 s, overlap 2 s → hop 28 s → two windows, each ≤ 30 s
     n = int(47.7 * 16000)
     samples = np.arange(n, dtype=np.float32)
     window = 480_000
-    overlap = 5 * 16000
+    overlap = 2 * 16000
     chunks = iter_audio_chunks(samples, window, overlap_samples=overlap)
     assert len(chunks) == 2
     assert len(chunks[0]) == window
     assert len(chunks[1]) == n - (window - overlap)
     assert all(len(c) <= window for c in chunks)
-    # overlap region matches
     hop = window - overlap
     np.testing.assert_array_equal(chunks[0][hop:], chunks[1][:overlap])
+
+
+def test_resolve_decode_token_limit_defaults_to_ctx(monkeypatch):
+    monkeypatch.delenv("WHISPER_MAX_DECODE_TOKENS", raising=False)
+    assert resolve_decode_token_limit(448) == 448
+    monkeypatch.setenv("WHISPER_MAX_DECODE_TOKENS", "auto")
+    assert resolve_decode_token_limit(448) == 448
+    monkeypatch.setenv("WHISPER_MAX_DECODE_TOKENS", "0")
+    assert resolve_decode_token_limit(448) == 448
+    monkeypatch.setenv("WHISPER_MAX_DECODE_TOKENS", "100")
+    assert resolve_decode_token_limit(448) == 100
+    monkeypatch.setenv("WHISPER_MAX_DECODE_TOKENS", "9999")
+    assert resolve_decode_token_limit(448) == 448
+
+
+def test_next_chunk_start_pulls_back_on_truncate():
+    # Long enough that end-snap does not fire; truncate → re-hear last 10 s.
+    sr = 16000
+    chunk = 480_000
+    hop = 28 * sr
+    overlap = 2 * sr
+    n = 90 * sr
+    nxt = _next_chunk_start(
+        start=0,
+        end=chunk,
+        n=n,
+        hop=hop,
+        overlap_samples=overlap,
+        chunk_samples=chunk,
+        sample_rate=sr,
+        truncated=True,
+        segments=None,
+        timestamps=False,
+    )
+    assert nxt == chunk - 10 * sr
+    nxt_ok = _next_chunk_start(
+        start=0,
+        end=chunk,
+        n=n,
+        hop=hop,
+        overlap_samples=overlap,
+        chunk_samples=chunk,
+        sample_rate=sr,
+        truncated=False,
+        segments=None,
+        timestamps=False,
+    )
+    assert nxt_ok == hop
+
+
+def test_merge_short_tail_replaces_tiny_final_window():
+    window = 480_000
+    n = 35 * 16000 + 9000  # last span ~7.9 s after overlap=2
+    samples = np.arange(n, dtype=np.float32)
+    overlap = 2 * 16000
+    spans = iter_audio_chunk_spans(samples, window, overlap_samples=overlap)
+    merged = _merge_short_tail_spans(
+        spans, samples, window, min_tail_samples=8 * 16000
+    )
+    assert len(merged) == len(spans)
+    final_start, final_chunk = merged[-1]
+    assert final_start == max(0, n - window)
+    assert len(final_chunk) == n - final_start
+    assert len(final_chunk) >= 8 * 16000 or final_start == 0
+
+
+def test_stft_power_matches_loop_reference():
+    rng = np.random.default_rng(42)
+    audio = rng.standard_normal(16000 * 3).astype(np.float32)
+    ref = _stft_power_loop(audio)
+    fast = _stft_power(audio)
+    assert ref.shape == fast.shape
+    np.testing.assert_allclose(ref, fast, rtol=0, atol=1e-5)
+
+    clip = rng.standard_normal(8000).astype(np.float32)
+    ref2 = _stft_power_loop(clip)
+    fast2 = _stft_power(clip)
+    np.testing.assert_allclose(ref2, fast2, rtol=0, atol=1e-5)
 
 
 def test_stitch_transcripts_dedupes_overlap():

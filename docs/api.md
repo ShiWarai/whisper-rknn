@@ -148,7 +148,9 @@ data: [DONE]
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|-------|
 | `WHISPER_CHUNK_SECONDS` | ~30 | Длина окна (не больше 30) |
-| `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие окон |
+| `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие окон |
+| `WHISPER_MIN_TAIL_SECONDS` | `8` | Хвост короче этого — одно финальное окно |
+| `WHISPER_DECODER_BACKEND` | `auto` | `onnx` / `rknn` / `auto` (onnx если есть `decoder.onnx`) |
 | `WHISPER_MAX_NGRAM_REPEAT` | `6` | Стоп при зацикливании токенов |
 
 ## Ошибки

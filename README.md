@@ -171,7 +171,9 @@ CPU-аналог: `hwdsl2/whisper-server` с тем же путём `/v1/audio/t
 | `WHISPER_MAX_AUDIO_SECONDS` | `600` | Потолок длительности для оценки RAM запроса; при нехватке MemAvailable — HTTP 507 |
 | `WHISPER_API_KEY` | — | Bearer-ключ для API (alias: `OPENAI_API_KEY`); пусто = без auth |
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
-| `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
+| `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
+| `WHISPER_MIN_TAIL_SECONDS` | `8` | Короткий хвост не гоняется отдельным окном |
+| `WHISPER_DECODER_BACKEND` | `auto` | CPU ONNX decoder при наличии `decoder.onnx` |
 | `WHISPER_MAX_NGRAM_REPEAT` | `6` | Остановка при зацикливании n-грамм в декодере |
 
 ---
