@@ -9,6 +9,7 @@ from app.audio_features import N_SAMPLES, compute_features, pad_or_trim
 from app.decode import (
     _HAS_AV,
     TranscriptSegment,
+    build_sot_sequence,
     causal_mask_1d,
     iter_audio_chunks,
     load_audio_16k_mono,
@@ -44,8 +45,9 @@ def test_model_config_base_from_path(monkeypatch):
     monkeypatch.delenv("WHISPER_VARIANT", raising=False)
     monkeypatch.setenv("WHISPER_LANGUAGE", "en")
     cfg = model_config_from_encoder_path("/models/base-encoder.rknn")
-    sot, eot, n_layer, n_ctx, n_state, n_mels, mel_frames, no_ts, ts_begin = cfg
-    assert sot == [50258, 50259, 50359, 50363]
+    size_key, english_only, eot, n_layer, n_ctx, n_state, n_mels, mel_frames, no_ts, ts_begin = cfg
+    assert size_key == "base"
+    assert english_only is False
     assert eot == 50257
     assert n_layer == 6
     assert n_ctx == 448
@@ -54,20 +56,49 @@ def test_model_config_base_from_path(monkeypatch):
     assert mel_frames == 3000
     assert no_ts == 50363
     assert ts_begin == 50364
+    sot = build_sot_sequence(
+        size_key=size_key,
+        english_only=english_only,
+        task="transcribe",
+        language="en",
+        notimestamps_id=no_ts,
+    )
+    assert sot == [50258, 50259, 50359, 50363]
 
 
 def test_model_config_turbo_profile(monkeypatch):
     monkeypatch.setenv("WHISPER_MODEL_PROFILE", "turbo")
     monkeypatch.setenv("WHISPER_LANGUAGE", "ru")
     cfg = model_config_from_encoder_path("/models/encoder.rknn")
-    sot, eot, n_layer, _, n_state, n_mels, _, no_ts, ts_begin = cfg
-    assert sot == [50258, 50263, 50360, 50364]  # ru + turbo specials
+    size_key, english_only, eot, n_layer, _, n_state, n_mels, _, no_ts, ts_begin = cfg
+    assert size_key == "turbo"
+    assert english_only is False
     assert eot == 50257
     assert n_layer == 4
     assert n_state == 1280
     assert n_mels == 128
     assert no_ts == 50364
     assert ts_begin == 50365
+    sot = build_sot_sequence(
+        size_key=size_key,
+        english_only=english_only,
+        task="transcribe",
+        language="ru",
+        notimestamps_id=no_ts,
+    )
+    assert sot == [50258, 50263, 50360, 50364]
+
+
+def test_build_sot_sequence_translate_turbo(monkeypatch):
+    monkeypatch.setenv("WHISPER_LANGUAGE", "ru")
+    sot = build_sot_sequence(
+        size_key="turbo",
+        english_only=False,
+        task="translate",
+        language="ru",
+        notimestamps_id=50364,
+    )
+    assert sot == [50258, 50263, 50359, 50364]
 
 
 def test_model_config_invalid_profile():

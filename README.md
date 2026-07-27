@@ -66,7 +66,7 @@
 
 ### Локальная сборка (RK3588)
 
-**RAM:** профиль `turbo` (~1.7 GiB весов + пик запроса) рассчитан на платы с **≥8 GiB** и достаточным `MemAvailable`. На 2–4 GiB используйте `base`/`small`. Сервис отказывается загружать модель при старте и возвращает **507** на `/transcribe`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS`).
+**RAM:** профиль `turbo` (~1.7 GiB весов + пик запроса) рассчитан на платы с **≥8 GiB** и достаточным `MemAvailable`. На 2–4 GiB используйте `base`/`small`. Сервис отказывается загружать модель при старте и возвращает **507** на `/v1/audio/transcriptions`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS`).
 
 Требуется `third_party/` с `librknnrt.so` и wheel rknnlite. См. [third_party/README.md](third_party/README.md).
 
@@ -126,22 +126,28 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 
 ## API
 
+Контракт совместим с [hwdsl2/docker-whisper](https://github.com/hwdsl2/docker-whisper) (OpenAI Audio API). Один клиент может переключаться между NPU и CPU сменой контейнера.
+
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/health` | `{ "status": "ok" }` или `"loading"` (без авторизации) |
-| POST | `/transcribe` | `multipart`: `file` (+ опц. `timestamps=true`) → `{ "text", "elapsed_s", "segments?" }` |
+| GET | `/health` | `{ "status": "ok", "model": "..." }` или `"loading"` |
+| GET | `/v1/models` | Список активной модели |
+| POST | `/v1/audio/transcriptions` | Транскрипция (multipart OpenAI) |
+| POST | `/v1/audio/translations` | Перевод аудио → английский |
 
-При заданном `WHISPER_API_KEY` / `OPENAI_API_KEY`: заголовок `Authorization: Bearer <key>` (как у OpenAI API).
+При заданном `WHISPER_API_KEY` / `OPENAI_API_KEY`: заголовок `Authorization: Bearer <key>`.
 
 Пример:
 
 ```bash
 docker run --rm --network whisper_rknn_default curlimages/curl:latest \
   -s -F "file=@/path/to/voice.ogg" \
-  http://whisper-rknn-api:9003/transcribe
+  -F "model=whisper-1" \
+  -F "language=ru" \
+  http://whisper-rknn-api:9003/v1/audio/transcriptions
 ```
 
-(порт задаётся через `PORT` в `.env`; по умолчанию в образе — `8080`)
+CPU-аналог: `hwdsl2/whisper-server` с тем же путём `/v1/audio/transcriptions`.
 
 Полное описание: [docs/api.md](docs/api.md).
 
@@ -161,9 +167,9 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
 | `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
 | `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
-| `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /transcribe` |
+| `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /v1/audio/transcriptions` |
 | `WHISPER_MAX_AUDIO_SECONDS` | `600` | Потолок длительности для оценки RAM запроса; при нехватке MemAvailable — HTTP 507 |
-| `WHISPER_API_KEY` | — | Bearer-ключ для `POST /transcribe` (alias: `OPENAI_API_KEY`); пусто = без auth |
+| `WHISPER_API_KEY` | — | Bearer-ключ для API (alias: `OPENAI_API_KEY`); пусто = без auth |
 | `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
 | `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
 | `WHISPER_MAX_NGRAM_REPEAT` | `6` | Остановка при зацикливании n-грамм в декодере |
@@ -175,8 +181,9 @@ docker run --rm --network whisper_rknn_default curlimages/curl:latest \
 ```
 whisper-rknn/
 ├── app/
-│   ├── api_server.py         # FastAPI + uvicorn
-│   ├── system_memory.py      # MemAvailable RAM forecast (startup + /transcribe)
+│   ├── api_server.py         # OpenAI-compatible FastAPI
+│   ├── openai_response.py    # response_format / SSE helpers
+│   ├── system_memory.py      # MemAvailable RAM forecast
 │   ├── decode.py             # RKNN encoder/decoder, chunking
 │   ├── audio_features.py     # mel-спектрограмма (numpy + knf)
 │   ├── whisper_languages.py  # language token ids без openai-whisper
@@ -236,7 +243,7 @@ Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
 
 ### Интеграция с ботом
 
-В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `WHISPER_RKNN_URL=http://whisper-rknn-api:9003` (порт из `.env` whisper-rknn). Язык распознавания настраивается в `.env` whisper-rknn: **`WHISPER_LANGUAGE=ru`** (или `en`, `uk`, …).
+В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `OPENAI_BASE_URL=http://whisper-rknn-api:9003/v1` (порт из `.env` whisper-rknn). Язык: `WHISPER_LANGUAGE=ru` в `.env` или `language=ru` в запросе.
 
 ---
 

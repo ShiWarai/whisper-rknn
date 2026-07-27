@@ -82,7 +82,7 @@ def estimate_request_ram_bytes(
     *,
     max_seconds: Optional[int] = None,
 ) -> int:
-    """Peak host RAM for one /transcribe request (intentionally high)."""
+    """Peak host RAM for one /v1/audio/transcriptions request (intentionally high)."""
     pcm_bytes = estimate_pcm_bytes(upload_bytes, max_seconds=max_seconds)
     mel_bytes = n_mels * MEL_TIME_FRAMES * BYTES_PER_FLOAT32
     kv_bytes = n_text_layer * 2 * n_text_ctx * n_text_state * BYTES_PER_FLOAT32

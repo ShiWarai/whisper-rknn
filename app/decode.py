@@ -18,13 +18,15 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, List, Optional, Tuple, Union
+from typing import BinaryIO, Callable, Iterator, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import soundfile as sf
 
 from app.audio_features import compute_features
 from app.whisper_languages import language_token_id
+
+TaskType = Literal["transcribe", "translate"]
 
 
 @dataclass
@@ -395,12 +397,59 @@ def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = No
     return rknn_lite
 
 
+def _default_language() -> str:
+    return os.environ.get("WHISPER_LANGUAGE", "ru").strip() or "ru"
+
+
+def _task_token_id(size_key: str, task: TaskType) -> int:
+    if size_key == "turbo":
+        return 50359 if task == "translate" else 50360
+    return 50358 if task == "translate" else 50359
+
+
+def build_sot_sequence(
+    *,
+    size_key: str,
+    english_only: bool,
+    task: TaskType = "transcribe",
+    language: Optional[str] = None,
+    timestamps: bool = False,
+    notimestamps_id: Optional[int] = None,
+) -> List[int]:
+    """Build Whisper decoder prompt tokens for a single request."""
+    if english_only:
+        if task == "translate":
+            raise ValueError(
+                "Translation is not supported with English-only models; "
+                "use a multilingual model."
+            )
+        seq = [50257, notimestamps_id]
+    elif size_key == "turbo":
+        lang_id = _language_token_id(language or _default_language())
+        task_id = _task_token_id(size_key, task)
+        seq = [50258, lang_id, task_id, notimestamps_id]
+    else:
+        lang_id = _language_token_id(language or _default_language())
+        task_id = _task_token_id(size_key, task)
+        seq = [50258, lang_id, task_id, notimestamps_id]
+
+    if (
+        timestamps
+        and notimestamps_id is not None
+        and seq
+        and seq[-1] == notimestamps_id
+    ):
+        return seq[:-1]
+    return seq
+
+
 class RKNNModel:
     def __init__(
         self,
         encoder: str,
         decoder: str,
-        sot_sequence: List[int],
+        size_key: str,
+        english_only: bool,
         eot: int,
         n_text_layer: int,
         n_text_ctx: int,
@@ -412,7 +461,8 @@ class RKNNModel:
         target_platform="rk3588",
         verbose: bool = True,
     ):
-        self.sot_sequence = sot_sequence
+        self.size_key = size_key
+        self.english_only = english_only
         self.eot = eot
         self.n_text_layer = n_text_layer
         self.n_text_ctx = n_text_ctx
@@ -424,7 +474,7 @@ class RKNNModel:
 
         core_mask = resolve_npu_core_mask()
         if verbose:
-            print("sot_sequence", self.sot_sequence)
+            print("model_size", self.size_key, "english_only", self.english_only)
             print("eot", self.eot)
             print("timestamp_begin", self.timestamp_begin)
             print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
@@ -432,17 +482,22 @@ class RKNNModel:
         self.encoder = init_model(encoder, core_mask=core_mask)
         self.decoder = init_model(decoder, core_mask=core_mask)
 
-    def sot_sequence_for(self, timestamps: bool) -> List[int]:
-        """Prompt tokens; drop <|notimestamps|> when segment timestamps are requested."""
-        seq = list(self.sot_sequence)
-        if (
-            timestamps
-            and self.notimestamps_id is not None
-            and seq
-            and seq[-1] == self.notimestamps_id
-        ):
-            return seq[:-1]
-        return seq
+    def sot_sequence_for(
+        self,
+        timestamps: bool,
+        *,
+        task: TaskType = "transcribe",
+        language: Optional[str] = None,
+    ) -> List[int]:
+        """Prompt tokens for the current request."""
+        return build_sot_sequence(
+            size_key=self.size_key,
+            english_only=self.english_only,
+            task=task,
+            language=language,
+            timestamps=timestamps,
+            notimestamps_id=self.notimestamps_id,
+        )
 
     def release(self):
         self.encoder.release()
@@ -637,6 +692,8 @@ def decode_samples(
     *,
     timestamps: bool = False,
     time_offset: float = 0.0,
+    task: TaskType = "transcribe",
+    language: Optional[str] = None,
 ) -> DecodeResult:
     """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
     features = compute_features(
@@ -649,7 +706,7 @@ def decode_samples(
     cross_kv = model.run_encoder(features)
     self_kv = model.get_self_cache()
 
-    sot = model.sot_sequence_for(timestamps)
+    sot = model.sot_sequence_for(timestamps, task=task, language=language)
     offset = np.array([0], dtype=np.int32)
     out = None
     for t in sot:
@@ -729,28 +786,9 @@ def decode_samples(
     return DecodeResult(text=text, segments=segments)
 
 
-def decode_utterance(
-    model: RKNNModel,
-    id2token: dict,
-    audio: Union[str, np.ndarray],
-    verbose: bool = True,
-    *,
-    timestamps: bool = False,
-) -> DecodeResult:
-    """
-    Full utterance: if longer than the model window (~30 s / 3000 mel), split into
-    sliding chunks of that window size (optional overlap), decode each, stitch text.
-
-    ``audio`` may be 16 kHz mono float32 samples or a path/bytes source for decoding.
-    When ``timestamps`` is True, returns segment spans for LLM/video alignment.
-    """
-    if isinstance(audio, np.ndarray):
-        samples = np.ascontiguousarray(audio, dtype=np.float32)
-    else:
-        samples = load_audio_16k_mono(audio)
+def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[Tuple[int, np.ndarray]], int, int]:
+    """Return chunk spans plus hop/overlap sample counts for timestamp trimming."""
     sample_rate = 16000
-
-    # Hard cap: never feed more samples than the static RKNN window (3000 mel ≈ 30 s).
     chunk_samples = whisper_window_samples(sample_rate, model.mel_time_frames)
     env_sec = os.environ.get("WHISPER_CHUNK_SECONDS", "").strip()
     if env_sec:
@@ -763,7 +801,6 @@ def decode_utterance(
         except ValueError:
             pass
 
-    # Overlap must stay inside the window so each encode still sees ≤3000 frames.
     overlap_samples = 0
     env_ov = os.environ.get("WHISPER_CHUNK_OVERLAP_SECONDS", "5").strip()
     if env_ov:
@@ -781,13 +818,39 @@ def decode_utterance(
         samples, chunk_samples, overlap_samples=overlap_samples
     )
     hop = chunk_samples - overlap_samples if overlap_samples else chunk_samples
+    return spans, hop, sample_rate
+
+
+def decode_utterance(
+    model: RKNNModel,
+    id2token: dict,
+    audio: Union[str, np.ndarray],
+    verbose: bool = True,
+    *,
+    timestamps: bool = False,
+    task: TaskType = "transcribe",
+    language: Optional[str] = None,
+    on_chunk: Optional[Callable[[DecodeResult], None]] = None,
+) -> DecodeResult:
+    """
+    Full utterance: if longer than the model window (~30 s / 3000 mel), split into
+    sliding chunks of that window size (optional overlap), decode each, stitch text.
+
+    ``audio`` may be 16 kHz mono float32 samples or a path/bytes source for decoding.
+    When ``timestamps`` is True, returns segment spans for LLM/video alignment.
+    """
+    if isinstance(audio, np.ndarray):
+        samples = np.ascontiguousarray(audio, dtype=np.float32)
+    else:
+        samples = load_audio_16k_mono(audio)
+
+    spans, hop, sample_rate = _utterance_chunk_spans(model, samples)
     if verbose or len(spans) > 1:
         dur_s = len(samples) / float(sample_rate)
         print(
             f"audio_chunks={len(spans)} duration_s={dur_s:.2f} "
-            f"window_s={chunk_samples / sample_rate:.2f} "
-            f"overlap_s={overlap_samples / sample_rate:.2f} "
-            f"timestamps={timestamps}"
+            f"window_s={spans[0][1].shape[0] / sample_rate if spans else 0:.2f} "
+            f"timestamps={timestamps} task={task}"
         )
 
     parts: List[str] = []
@@ -805,7 +868,11 @@ def decode_utterance(
             verbose=verbose,
             timestamps=timestamps,
             time_offset=time_offset,
+            task=task,
+            language=language,
         )
+        if on_chunk is not None and result.text:
+            on_chunk(result)
         if timestamps and result.segments is not None:
             segs = result.segments
             if i < len(spans) - 1:
@@ -829,6 +896,39 @@ def decode_utterance(
     if verbose and len(spans) > 1:
         print(text)
     return DecodeResult(text=text, segments=segments)
+
+
+def decode_utterance_stream(
+    model: RKNNModel,
+    id2token: dict,
+    audio: Union[str, np.ndarray],
+    verbose: bool = True,
+    *,
+    timestamps: bool = False,
+    task: TaskType = "transcribe",
+    language: Optional[str] = None,
+) -> Iterator[DecodeResult]:
+    """Yield per-chunk decode results as each RKNN window completes."""
+    if isinstance(audio, np.ndarray):
+        samples = np.ascontiguousarray(audio, dtype=np.float32)
+    else:
+        samples = load_audio_16k_mono(audio)
+
+    spans, hop, sample_rate = _utterance_chunk_spans(model, samples)
+    for i, (start_sample, chunk) in enumerate(spans):
+        time_offset = start_sample / float(sample_rate)
+        result = decode_samples(
+            model,
+            id2token,
+            chunk,
+            verbose=verbose,
+            timestamps=timestamps,
+            time_offset=time_offset,
+            task=task,
+            language=language,
+        )
+        if result.text:
+            yield result
 
 
 def _infer_model_size_key(encoder_path: str, profile: Optional[str]) -> str:
@@ -865,29 +965,22 @@ def model_config_from_encoder_path(
     """Return decoder hyperparams + mel shape for a given encoder .rknn path."""
     prof_env = os.environ.get("WHISPER_MODEL_PROFILE") or os.environ.get("WHISPER_VARIANT")
     size_key = _infer_model_size_key(encoder_path, profile if profile is not None else prof_env)
-    lang = os.environ.get("WHISPER_LANGUAGE", "ru")
 
     enc = encoder_path
-    if ".en" in enc:
+    english_only = ".en" in enc
+    if english_only:
         notimestamps_id = 50362
         timestamp_begin = 50363
-        sot_sequence = [50257, notimestamps_id]
         eot = 50256
         n_mels, mel_time_frames = 80, 3000
     elif size_key == "turbo":
-        # large-v3 / turbo: vocab with 100 languages → transcribe=50360, notimestamps=50364
-        lang_id = _language_token_id(lang)
         notimestamps_id = 50364
         timestamp_begin = 50365
-        sot_sequence = [50258, lang_id, 50360, notimestamps_id]
         eot = 50257
         n_mels, mel_time_frames = 128, 3000
     else:
-        # tiny..medium multilingual (99 langs): transcribe=50359, notimestamps=50363
-        lang_id = _language_token_id(lang)
         notimestamps_id = 50363
         timestamp_begin = 50364
-        sot_sequence = [50258, lang_id, 50359, notimestamps_id]
         eot = 50257
         n_mels, mel_time_frames = 80, 3000
 
@@ -905,7 +998,8 @@ def model_config_from_encoder_path(
         raise ValueError(f"Unsupported model size: {size_key!r}")
 
     return (
-        sot_sequence,
+        size_key,
+        english_only,
         eot,
         n_text_layer,
         n_text_ctx,
