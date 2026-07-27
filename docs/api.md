@@ -117,7 +117,15 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопр�
 
 ### Streaming (`stream=true`)
 
-Ответ: `text/event-stream` (SSE), протокол OpenAI:
+Работает для **`POST /v1/audio/transcriptions`** и **`POST /v1/audio/translations`**.
+
+| Поле | Тип | По умолчанию | Смысл |
+|------|-----|--------------|-------|
+| `stream` | bool/string | `false` | `true` → SSE (`text/event-stream`) |
+
+При `stream=true` поле `response_format` не используется (как у hwdsl2): ответ всегда поток событий, финальный текст в `transcript.text.done`.
+
+Ответ: `text/event-stream`, протокол OpenAI:
 
 ```
 data: {"type":"transcript.text.delta","delta":"..."}
@@ -127,13 +135,20 @@ data: {"type":"transcript.text.done","text":"полный текст"}
 data: [DONE]
 ```
 
-На RKNN дельты приходят после каждого chunk-окна (~30 с).
+На RKNN дельты приходят после каждого chunk-окна (~30 с), не по словам. Для файла короче 30 с — одна дельта.
 
 ## `POST /v1/audio/translations`
 
 Перевод аудио на английский. Те же параметры, что у transcriptions (кроме `timestamp_granularities` на translations — всегда segment).
 
 Не поддерживается для English-only моделей (`.en`) — **400**.
+
+Streaming (`stream=true`) — тот же SSE-протокол, что у transcriptions.
+
+```bash
+curl -s -F "file=@voice.ogg" -F "model=whisper-1" -F "language=ru" -F "stream=true" \
+  http://whisper-rknn-api:9003/v1/audio/translations
+```
 
 ## Inference
 
@@ -153,16 +168,24 @@ data: [DONE]
 
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|-------|
-| `WHISPER_CHUNK_SECONDS` | ~30 | Длина окна (не больше 30) |
-| `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие окон |
-| `WHISPER_MIN_TAIL_SECONDS` | `8` | Хвост короче этого — одно финальное окно |
-| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `auto` |
-| `WHISPER_DECODER` | `/models/decoder.onnx` | Путь к decoder (onnx или rknn) |
-| `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в `n_text_ctx`; число — мягкий потолок |
-| `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост |
-| `WHISPER_MAX_NGRAM_REPEAT` | `6` | Стоп при зацикливании токенов |
-
 Поле `timings` в `verbose_json` (и в логах API): `audio_ms`, `mel_ms`, `encoder_ms`, `decoder_ms`, `tokens`, `decoder_calls`, `chunks`, `wall_ms`, `rtf`, `decoder_backend`, `truncated`.
+
+## Переменные окружения
+
+Шаблон для `.env`: [`.env.example`](../.env.example). Модельные пути, язык, NPU, автозагрузка — в [models.md](models.md#переменные-окружения).
+
+| Переменная | По умолчанию | Смысл |
+|------------|--------------|-------|
+| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (в compose обычно `PORT=9003`) |
+| `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /v1/audio/*` |
+| `WHISPER_MAX_AUDIO_SECONDS` | `600` | Потолок длительности для оценки RAM; при нехватке MemAvailable — **507** |
+| `WHISPER_API_KEY` | — | Bearer-ключ (alias: `OPENAI_API_KEY`); пусто = без auth |
+| `WHISPER_CHUNK_SECONDS` | ~30 | Длина окна (не больше 30 mel-кадров) |
+| `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие соседних окон; `0` — встык |
+| `WHISPER_MIN_TAIL_SECONDS` | `8` | Короткий хвост не гоняется отдельным окном |
+| `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в `n_text_ctx` (448); число — мягкий потолок |
+| `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост |
+| `WHISPER_MAX_NGRAM_REPEAT` | `6` | Стоп при зацикливании n-грамм в декодере |
 
 ## Ошибки
 

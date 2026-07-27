@@ -27,7 +27,7 @@
 |--------|------------|
 | [Быстрый старт](#быстрый-старт) | Запуск за 3 шага |
 | [Установка и запуск](#установка-и-запуск) | Локальная сборка, prod/prerelease из GHCR |
-| [Модели и third_party](#модели-и-third_party) | `.rknn`, `decoder.onnx`, SDK |
+| [Модели](#модели) | Веса, third_party, автозагрузка |
 | [API](#api) | Эндпоинты |
 | [Структура проекта](#структура-проекта) | Дерево каталогов |
 | [Тестирование](#тестирование) | ruff, pytest в dev-контейнере |
@@ -64,119 +64,46 @@
 
 ## Установка и запуск
 
-### Локальная сборка (RK3588)
-
-**RAM:** профиль `turbo` (~1.7 GiB весов + пик запроса) рассчитан на платы с **≥8 GiB** и достаточным `MemAvailable`. На 2–4 GiB используйте `base`/`small`. Сервис отказывается загружать модель при старте и возвращает **507** на `/v1/audio/transcriptions`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS`).
-
-Требуется `third_party/` с `librknnrt.so` и wheel rknnlite. См. [third_party/README.md](third_party/README.md).
-
-На хосте нужны устройства NPU (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
+На **RK3588** (`linux/arm64`): `third_party/`, устройства NPU в `docker-compose.yml`, каталог моделей на хосте. Подробности — [docs/models.md](docs/models.md).
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-Сервис: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel + apt ffmpeg, без PyTorch).
+Образ из GHCR (`:main`, `:prerelease`), prerelease-теги, локальные тесты как в CI: [docs/cicd.md](docs/cicd.md).
 
-### Автозагрузка turbo
-
-Как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm) — при старте контейнера:
-
-```bash
-# в .env
-WHISPER_DOWNLOAD_MODELS=turbo
-WHISPER_MODEL_PROFILE=turbo
-WHISPER_LANGUAGE=ru
-WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
-```
-
-Источник: [HF ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo) (`encoder.rknn`, `decoder.onnx`, `tokens.txt` — ~2.0 GB).
-
-### Продакшен (образ из GHCR)
-
-```bash
-docker pull ghcr.io/shiwarai/whisper-rknn:main
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-```
-
-### Prerelease (тестовый стенд)
-
-```bash
-docker pull ghcr.io/shiwarai/whisper-rknn:prerelease
-docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
-```
-
-Подробнее: [docs/cicd.md](docs/cicd.md).
+Переменные окружения: шаблон [`.env.example`](.env.example), справочник в [docs/models.md](docs/models.md#переменные-окружения) и [docs/api.md](docs/api.md#переменные-окружения).
 
 ---
 
-## Модели и third_party
+## Модели
 
-| Путь | Назначение |
-|------|------------|
-| `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
-| `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
-| `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
-| Каталог моделей на хосте | `encoder.rknn`, `decoder.onnx`, `tokens.txt` |
-
-Версия **`librknnrt.so`** должна совпадать с toolchain, которым собраны `.rknn`. Подробнее: [docs/models.md](docs/models.md).
+Файлы `encoder.rknn`, `decoder.onnx`, `tokens.txt` в `WHISPER_MODELS_DIR`; автозагрузка turbo, язык, RAM, toolchain: **[docs/models.md](docs/models.md)**. Runtime NPU: [third_party/README.md](third_party/README.md).
 
 ---
 
 ## API
 
-Контракт совместим с [hwdsl2/docker-whisper](https://github.com/hwdsl2/docker-whisper) (OpenAI Audio API). Один клиент может переключаться между NPU и CPU сменой контейнера.
+Контракт совместим с [hwdsl2/docker-whisper](https://github.com/hwdsl2/docker-whisper) (OpenAI Audio API). NPU — этот сервис, CPU — `hwdsl2/whisper-server`; меняется только контейнер, пути те же.
 
-| Метод | Путь | Описание |
-|-------|------|----------|
-| GET | `/health` | `{ "status": "ok", "model": "..." }` или `"loading"` |
-| GET | `/v1/models` | Список активной модели |
-| POST | `/v1/audio/transcriptions` | Транскрипция (multipart OpenAI) |
-| POST | `/v1/audio/translations` | Перевод аудио → английский |
+| Метод | Путь |
+|-------|------|
+| GET | `/health` |
+| GET | `/v1/models` |
+| POST | `/v1/audio/transcriptions` |
+| POST | `/v1/audio/translations` |
 
-При заданном `WHISPER_API_KEY` / `OPENAI_API_KEY`: заголовок `Authorization: Bearer <key>`.
-
-Пример:
+Проверка после старта:
 
 ```bash
 docker run --rm --network whisper_rknn_default curlimages/curl:latest \
-  -s -F "file=@/path/to/voice.ogg" \
-  -F "model=whisper-1" \
-  -F "language=ru" \
-  http://whisper-rknn-api:9003/v1/audio/transcriptions
+  -s http://whisper-rknn-api:9003/health
 ```
 
-CPU-аналог: `hwdsl2/whisper-server` с тем же путём `/v1/audio/transcriptions`.
+Параметры (`file`, `language`, `response_format`, `stream`, auth, streaming SSE, примеры curl, ошибки, chunking): **[docs/api.md](docs/api.md)**.
 
-Полное описание: [docs/api.md](docs/api.md).
-
-### Переменные окружения
-
-| Переменная | По умолчанию | Смысл |
-|------------|--------------|-------|
-| `WHISPER_ENCODER` | `/models/encoder.rknn` | Encoder RKNN (NPU) |
-| `WHISPER_DECODER` | `/models/decoder.onnx` | Decoder (ONNX на CPU по умолчанию) |
-| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `auto` (если есть `decoder.onnx`) |
-| `WHISPER_TOKENS` | `/models/tokens.txt` | Токены |
-| `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
-| `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
-| `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
-| `WHISPER_LANGUAGE` | `ru` | Язык распознавания: код Whisper (`ru`, `en`, `uk`, …). **Обязательно** задать под ваше аудио — иначе turbo может «галлюцинировать» на английском |
-| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2` (все), `all`, `auto` |
-| `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |
-| `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
-| `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
-| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (переопределяется в `.env`) |
-| `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /v1/audio/transcriptions` |
-| `WHISPER_MAX_AUDIO_SECONDS` | `600` | Потолок длительности для оценки RAM запроса; при нехватке MemAvailable — HTTP 507 |
-| `WHISPER_API_KEY` | — | Bearer-ключ для API (alias: `OPENAI_API_KEY`); пусто = без auth |
-| `WHISPER_CHUNK_SECONDS` | окно модели (~30) | Длина куска ≤ окна 3000 mel; для ГС длиннее окна |
-| `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие соседних окон (сэмплы внутри тех же 30 с); `0` — встык |
-| `WHISPER_MIN_TAIL_SECONDS` | `8` | Короткий хвост не гоняется отдельным окном |
-| `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в пределах `n_text_ctx` (448); число — мягкий потолок |
-| `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост в следующем окне |
-| `WHISPER_MAX_NGRAM_REPEAT` | `6` | Остановка при зацикливании n-грамм в декодере |
+Для бота: `OPENAI_BASE_URL=http://whisper-rknn-api:9003/v1` (порт из `.env`).
 
 ---
 
@@ -220,35 +147,19 @@ whisper-rknn/
 
 ## Тестирование
 
-Dev-образ без NPU (как в CI):
-
 ```bash
 docker compose -f docker-compose.dev.yml build dev
 docker compose -f docker-compose.dev.yml run --rm -T dev ruff check .
 docker compose -f docker-compose.dev.yml run --rm dev pytest tests/ -v --tb=short
 ```
 
-Тесты проверяют чистые функции декодера и HTTP-контракт API с моками RKNN.
+Подробнее (как в CI, кэш GHA): [docs/cicd.md](docs/cicd.md#локальные-тесты-как-в-ci).
 
 ---
 
 ## CI/CD
 
-| Workflow | Триггер | Назначение |
-|----------|---------|------------|
-| **Deploy** | Push `main` / `dev` | ruff + pytest |
-| **Deploy → prerelease** | `[prerelease]` в коммите на `dev` | `:prerelease` в GHCR |
-| **Publish** | Успешный Deploy на `main` | `:main` в GHCR |
-
-Образ: `ghcr.io/shiwarai/whisper-rknn` (**только** `linux/arm64`). Теги: `:main`, `:prerelease`, `:<git-sha>`.
-
-Telegram: secrets `TELEGRAM_TOKEN`, `TELEGRAM_TO` (опционально).
-
-Детали: [docs/cicd.md](docs/cicd.md).
-
-### Интеграция с ботом
-
-В **robotics-openproject-ai-bot** подключите тот же образ/сеть и задайте `OPENAI_BASE_URL=http://whisper-rknn-api:9003/v1` (порт из `.env` whisper-rknn). Язык: `WHISPER_LANGUAGE=ru` в `.env` или `language=ru` в запросе.
+Workflows, GHCR, prerelease `[prerelease]`, Telegram: **[docs/cicd.md](docs/cicd.md)**.
 
 ---
 

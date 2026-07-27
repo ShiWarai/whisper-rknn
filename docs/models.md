@@ -12,6 +12,26 @@
 
 Репозиторий весов: [ShiWarai/sherpa-rknn-whisper-turbo](https://huggingface.co/ShiWarai/sherpa-rknn-whisper-turbo).
 
+## Требования к железу и RAM
+
+Профиль **`turbo`** (~1.7 GiB весов + пик запроса) рассчитан на платы с **≥8 GiB** RAM и достаточным `MemAvailable`. На 2–4 GiB используйте `base`/`small`.
+
+Сервис отказывается загружать модель при старте и возвращает **507** на `/v1/audio/transcriptions`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS` в [api.md](api.md#переменные-окружения)).
+
+Контейнер: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel + apt ffmpeg, без PyTorch).
+
+На хосте нужны устройства NPU (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
+
+## third_party и mel-фильтры
+
+| Путь | Назначение |
+|------|------------|
+| `third_party/librknnrt.so` | Runtime для NPU; копируется в `/usr/lib` при сборке образа |
+| `third_party/rknn_toolkit_lite2-2.3.2-…-aarch64.whl` | Python-пакет rknnlite (версия зашита в `Dockerfile`) |
+| `app/assets/mel_filters.npz` | Mel-фильтры Whisper (turbo 128 / base 80 mel), без `openai-whisper` |
+
+Подробнее о runtime: [third_party/README.md](../third_party/README.md).
+
 ## Каталог на хосте
 
 В `.env`:
@@ -103,3 +123,22 @@ WHISPER_MODEL_PROFILE=turbo
   decoder.onnx
   tokens.txt
 ```
+
+## Переменные окружения
+
+Шаблон для `.env`: [`.env.example`](../.env.example). Переменные API, chunking и auth — в [api.md](api.md#переменные-окружения).
+
+| Переменная | По умолчанию | Смысл |
+|------------|--------------|-------|
+| `WHISPER_ENCODER` | `/models/encoder.rknn` | Encoder RKNN (NPU) |
+| `WHISPER_DECODER` | `/models/decoder.onnx` | Decoder (ONNX на CPU по умолчанию) |
+| `WHISPER_DECODER_BACKEND` | `onnx` | `onnx` / `auto` (если есть `decoder.onnx`) |
+| `WHISPER_TOKENS` | `/models/tokens.txt` | Токены |
+| `WHISPER_DOWNLOAD_MODELS` | `0` | `turbo` или `1` — скачать turbo с HF при старте |
+| `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
+| `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
+| `WHISPER_LANGUAGE` | `ru` | Код Whisper (`ru`, `en`, `uk`, …). **Обязательно** под ваше аудио |
+| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2`, `all`, `auto` |
+| `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |
+| `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
+| `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
