@@ -21,7 +21,11 @@ ENV/
 .env.*
 !.env.example
 
-# Тестовые/загруженные аудио (при необходимости закоммитьте конкретные файлы через git add -f)
+# Локальные тестовые записи и вывод демо (не в git)
+samples/audio/
+samples/vad_out/
+
+# Аудио вне samples/ (на всякий случай)
 *.wav
 *.mp3
 *.ogg
@@ -42,3 +46,5 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+rknn-build/

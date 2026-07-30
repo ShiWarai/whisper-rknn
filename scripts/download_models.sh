@@ -21,11 +21,12 @@ declare -a WANT_LOCAL=()
 declare -a WANT_URL=()
 
 add_turbo() {
-  WANT_LOCAL+=("encoder.rknn" "decoder.onnx" "tokens.txt")
+  WANT_LOCAL+=("encoder.rknn" "decoder.onnx" "tokens.txt" "silero_vad.onnx")
   WANT_URL+=(
     "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/encoder.rknn"
     "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/decoder.onnx"
     "${HF_BASE}/${HF_TURBO_REPO}/resolve/main/tokens.txt"
+    "${WHISPER_VAD_MODEL_URL:-https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx}"
   )
 }
 

@@ -11,12 +11,14 @@ from app.system_memory import (
     MODEL_HEADROOM,
     PCM_EXPANSION_FACTOR,
     REQUEST_OVERHEAD_BYTES,
+    estimate_encoder_pool_ram_bytes,
     estimate_model_ram_bytes,
     estimate_pcm_bytes,
     estimate_request_ram_bytes,
     file_size_bytes,
     has_enough_ram,
     max_audio_seconds,
+    pick_encoder_worker_count,
     read_mem_available_bytes,
 )
 
@@ -83,3 +85,40 @@ def test_estimate_request_ram_bytes_includes_components():
     mel = 80 * 3000 * BYTES_PER_FLOAT32
     kv = 4 * 2 * 448 * 384 * BYTES_PER_FLOAT32
     assert need == 1_000_000 + pcm + mel + kv + REQUEST_OVERHEAD_BYTES
+
+
+def test_pick_encoder_worker_count_unknown_mem_tries_max(monkeypatch, tmp_path):
+    enc = tmp_path / "encoder.rknn"
+    enc.write_bytes(b"x" * 1000)
+    monkeypatch.setattr("app.system_memory.read_mem_available_bytes", lambda: None)
+    assert pick_encoder_worker_count(enc, max_workers=3) == 3
+
+
+def test_pick_encoder_worker_count_scales_with_ram(monkeypatch, tmp_path):
+    enc = tmp_path / "encoder.rknn"
+    enc.write_bytes(b"x" * (100 * 1024 * 1024))
+    per = estimate_encoder_pool_ram_bytes(enc, None, 1)
+
+    monkeypatch.setattr(
+        "app.system_memory.read_mem_available_bytes",
+        lambda: per * 3 + 1024,
+    )
+    assert pick_encoder_worker_count(enc, max_workers=3) == 3
+
+    monkeypatch.setattr(
+        "app.system_memory.read_mem_available_bytes",
+        lambda: per * 2 + 1024,
+    )
+    assert pick_encoder_worker_count(enc, max_workers=3) == 2
+
+    monkeypatch.setattr(
+        "app.system_memory.read_mem_available_bytes",
+        lambda: per + 1024,
+    )
+    assert pick_encoder_worker_count(enc, max_workers=3) == 1
+
+    monkeypatch.setattr(
+        "app.system_memory.read_mem_available_bytes",
+        lambda: per // 2,
+    )
+    assert pick_encoder_worker_count(enc, max_workers=3) == 0

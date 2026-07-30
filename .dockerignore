@@ -1,6 +1,7 @@
 .venv
 .git
 .cache
+samples/
 .env
 .env.*
 !.env.example

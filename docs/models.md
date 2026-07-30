@@ -37,7 +37,7 @@
 В `.env`:
 
 ```bash
-WHISPER_MODELS_DIR=/mnt/nvme0/models/whisper-rknn-turbo
+WHISPER_MODELS_DIR=/mnt/nvme0/models/sherpa-rknn-whisper-turbo
 WHISPER_MODEL_PROFILE=turbo
 WHISPER_LANGUAGE=ru
 ```
@@ -67,11 +67,27 @@ docker compose up -d --force-recreate
 аудио → mel (CPU) → encoder.rknn (NPU) → cross_kv → decoder.onnx (CPU) → текст
 ```
 
-`decoder.onnx` экспортирован из sherpa-onnx (`export_onnx.py --model turbo`); autoregressive decode на CPU через ONNX Runtime (~2× быстрее, чем decoder на NPU).
+`decoder.onnx` — dynamic INT8 (MatMul, QInt8) из sherpa-onnx export; autoregressive decode на CPU через ONNX Runtime (~2× быстрее decoder на NPU, ~10% быстрее FP32 decoder на CPU).
 
 ```bash
 WHISPER_DECODER_BACKEND=onnx
 WHISPER_DECODER=/models/decoder.onnx
+```
+
+## Параллельный encode + VAD-нарезка (RAM)
+
+Для аудио длиннее окна encoder (~30 с): **Silero VAD** режет по паузам без речи, **encoder pool** (до N× `encoder.rknn` на dedicated NPU cores) кодирует параллельно, **decoder.onnx** на CPU — последовательно. VAD ONNX грузится при старте API (вместе с encoder pool). Всё в ОЗУ.
+
+**Silero VAD (`silero_vad.onnx`):** при `WHISPER_DOWNLOAD_MODELS=turbo` кладётся в `/models` вместе с whisper-весами (`download_models.sh`). Иначе API ищет файл в порядке: `WHISPER_VAD_MODEL` → `/models/silero_vad.onnx` → скачивает в `.cache/silero_vad.onnx` при первом старте (нужен исходящий HTTP).
+
+```bash
+WHISPER_PARALLEL_ENCODE=1
+WHISPER_ENCODER_WORKERS=0    # 0 = auto N→…→1 по MemAvailable (+ NPU probe)
+# WHISPER_ENCODER_MAX_WORKERS=3  # потолок (по умолчанию = число NPU_CORE_N в rknnlite)
+WHISPER_MAX_CHUNK_SECONDS=30
+WHISPER_VAD_THRESHOLD=0.5
+WHISPER_VAD_SEARCH_BACK_SEC=3
+WHISPER_VAD_MIN_GAP_MS=250
 ```
 
 ## Длинное аудио
@@ -118,9 +134,9 @@ WHISPER_MODEL_PROFILE=turbo
 ## Раскладка файлов
 
 ```
-/mnt/nvme0/models/whisper-rknn-turbo/
+/mnt/nvme0/models/sherpa-rknn-whisper-turbo/
   encoder.rknn
-  decoder.onnx
+  decoder.onnx          # INT8
   tokens.txt
 ```
 
@@ -138,7 +154,16 @@ WHISPER_MODEL_PROFILE=turbo
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
 | `WHISPER_LANGUAGE` | `ru` | Код Whisper (`ru`, `en`, `uk`, …). **Обязательно** под ваше аудио |
-| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU: `0`, `0_1`, `0_1_2`, `all`, `auto` |
+| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU (single-encoder режим) |
+| `WHISPER_PARALLEL_ENCODE` | `1` | VAD + parallel encoder pool |
+| `WHISPER_ENCODER_WORKERS` | `0` | `0` = auto (MemAvailable + NPU probe); `1..N` = force ceiling |
+| `WHISPER_ENCODER_MAX_WORKERS` | число `NPU_CORE_N` | Потолок воркеров (RK3588: 3; больше — на SoC с большим числом ядер) |
+| `WHISPER_MAX_CHUNK_SECONDS` | `30` | Макс. длина VAD-чанка |
+| `WHISPER_VAD_THRESHOLD` | `0.5` | Порог Silero VAD |
+| `WHISPER_VAD_SEARCH_BACK_SEC` | `3` | Окно поиска паузы перед лимитом |
+| `WHISPER_VAD_MIN_GAP_MS` | `250` | Мин. длина non-speech для среза |
+| `WHISPER_VAD_MODEL` | — | Путь к `silero_vad.onnx` (иначе `/models/silero_vad.onnx`, иначе auto-download в `.cache/`) |
+| `WHISPER_VAD_MODEL_URL` | GitHub silero-vad | URL для auto-download / `download_models.sh` |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
 | `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |

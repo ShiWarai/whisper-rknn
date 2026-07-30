@@ -55,12 +55,18 @@ class DecodeTimings:
     rtf: float = 0.0
     decoder_backend: str = "rknn"
     truncated: bool = False
+    vad_ms: float = 0.0
+    cut_ms: float = 0.0
+    encode_queue_wait_ms: float = 0.0
+    encoder_wall_ms: float = 0.0
+    parallel_workers: int = 0
 
     def to_dict(self) -> dict:
         return {
             "audio_ms": round(self.audio_ms, 2),
             "mel_ms": round(self.mel_ms, 2),
             "encoder_ms": round(self.encoder_ms, 2),
+            "encoder_wall_ms": round(self.encoder_wall_ms, 2),
             "decoder_ms": round(self.decoder_ms, 2),
             "tokens": self.tokens,
             "decoder_calls": self.decoder_calls,
@@ -69,18 +75,28 @@ class DecodeTimings:
             "rtf": round(self.rtf, 4),
             "decoder_backend": self.decoder_backend,
             "truncated": self.truncated,
+            "vad_ms": round(self.vad_ms, 2),
+            "cut_ms": round(self.cut_ms, 2),
+            "encode_queue_wait_ms": round(self.encode_queue_wait_ms, 2),
+            "parallel_workers": self.parallel_workers,
         }
 
     def merge(self, other: "DecodeTimings") -> None:
         self.audio_ms += other.audio_ms
         self.mel_ms += other.mel_ms
         self.encoder_ms += other.encoder_ms
+        self.encoder_wall_ms += other.encoder_wall_ms
         self.decoder_ms += other.decoder_ms
         self.tokens += other.tokens
         self.decoder_calls += other.decoder_calls
         self.chunks += other.chunks
         self.wall_ms += other.wall_ms
         self.truncated = self.truncated or other.truncated
+        self.vad_ms += other.vad_ms
+        self.cut_ms += other.cut_ms
+        self.encode_queue_wait_ms += other.encode_queue_wait_ms
+        if other.parallel_workers:
+            self.parallel_workers = other.parallel_workers
         if other.decoder_backend and other.decoder_backend != self.decoder_backend:
             self.decoder_backend = other.decoder_backend
 
@@ -434,15 +450,22 @@ def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = No
         core_mask = resolve_npu_core_mask()
 
     rknn_lite = RKNNLite(verbose=False)
-    ret = rknn_lite.load_rknn(path=filename)
-    if ret != 0:
-        raise RuntimeError(f"Load model {filename} failed!")
+    try:
+        ret = rknn_lite.load_rknn(path=filename)
+        if ret != 0:
+            raise RuntimeError(f"Load model {filename} failed!")
 
-    ret = rknn_lite.init_runtime(core_mask=core_mask)
-    if ret != 0:
-        raise RuntimeError(
-            f"Failed to init rknn runtime for {filename} (core_mask={core_mask})"
-        )
+        ret = rknn_lite.init_runtime(core_mask=core_mask)
+        if ret != 0:
+            raise RuntimeError(
+                f"Failed to init rknn runtime for {filename} (core_mask={core_mask})"
+            )
+    except Exception:
+        try:
+            rknn_lite.release()
+        except Exception:
+            pass
+        raise
     return rknn_lite
 
 
@@ -510,6 +533,7 @@ class RKNNModel:
         target_platform="rk3588",
         verbose: bool = True,
         decoder_backend: Optional[str] = None,
+        encoder_workers: Optional[int] = None,
     ):
         self.size_key = size_key
         self.english_only = english_only
@@ -528,22 +552,54 @@ class RKNNModel:
         )
         self.decoder_backend = backend
         self.decoder_path = decoder_path
+        self.encoder_path = encoder
 
-        core_mask = resolve_npu_core_mask()
+        from app.encode_pool import EncoderPool, resolve_encoder_worker_count
+
+        self._encoder_pool: Optional[EncoderPool] = None
+        self.encoder = None
+        self.encoder_workers = 1
+
+        if parallel_encode_enabled():
+            n_workers = resolve_encoder_worker_count(
+                encoder,
+                requested=encoder_workers,
+                decoder_path=decoder_path,
+            )
+            if n_workers < 1:
+                raise RuntimeError(
+                    "encoder_pool: insufficient MemAvailable for even 1 encoder worker "
+                    "(set WHISPER_ENCODER_WORKERS=1 to force, or free RAM)"
+                )
+            if verbose:
+                print(f"encoder_pool: MemAvailable pick={n_workers}, probing NPU…")
+            self._encoder_pool = EncoderPool(
+                encoder,
+                n_workers=n_workers,
+                target_platform=target_platform,
+                verbose=verbose,
+                n_mels=n_mels,
+                mel_time_frames=mel_time_frames,
+            )
+            self.encoder_workers = self._encoder_pool.n_workers
+        else:
+            core_mask = resolve_npu_core_mask()
+            if verbose:
+                print("model_size", self.size_key, "english_only", self.english_only)
+                print("eot", self.eot)
+                print("timestamp_begin", self.timestamp_begin)
+                print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
+            self.encoder = init_model(encoder, core_mask=core_mask)
+
         if verbose:
-            print("model_size", self.size_key, "english_only", self.english_only)
-            print("eot", self.eot)
-            print("timestamp_begin", self.timestamp_begin)
-            print("npu_core_mask", core_mask, os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2"))
             print("decoder_backend", self.decoder_backend, self.decoder_path)
-
-        self.encoder = init_model(encoder, core_mask=core_mask)
         self._onnx_decoder: Optional[OnnxDecoder] = None
         self.decoder = None
         if self.decoder_backend == "onnx":
             self._onnx_decoder = OnnxDecoder(decoder_path, n_text_layer=n_text_layer)
         else:
-            self.decoder = init_model(decoder_path, core_mask=core_mask)
+            dec_mask = resolve_npu_core_mask()
+            self.decoder = init_model(decoder_path, core_mask=dec_mask)
 
     def sot_sequence_for(
         self,
@@ -563,7 +619,12 @@ class RKNNModel:
         )
 
     def release(self):
-        self.encoder.release()
+        if self._encoder_pool is not None:
+            self._encoder_pool.shutdown()
+            self._encoder_pool = None
+        if self.encoder is not None:
+            self.encoder.release()
+            self.encoder = None
         if self.decoder is not None:
             self.decoder.release()
         if self._onnx_decoder is not None:
@@ -571,6 +632,10 @@ class RKNNModel:
 
     def run_encoder(self, x):
         arr = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
+        if self._encoder_pool is not None:
+            future = self._encoder_pool.submit(0, arr)
+            return future.result().cross_kv
+        assert self.encoder is not None
         return self.encoder.inference(inputs=[arr])
 
     def get_self_cache(self) -> List[np.ndarray]:
@@ -599,6 +664,30 @@ def whisper_window_samples(sample_rate: int = 16000, mel_time_frames: int = 3000
     """Samples per model window (~30 s for mel_time_frames=3000 @ 100 frames/s)."""
     seconds = float(mel_time_frames) / 100.0
     return max(1, int(round(seconds * sample_rate)))
+
+
+def parallel_encode_enabled() -> bool:
+    return os.environ.get("WHISPER_PARALLEL_ENCODE", "1").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _max_chunk_samples(model: RKNNModel, sample_rate: int = 16000) -> int:
+    chunk_samples = whisper_window_samples(sample_rate, model.mel_time_frames)
+    raw = os.environ.get("WHISPER_MAX_CHUNK_SECONDS", "").strip()
+    if not raw:
+        raw = os.environ.get("WHISPER_CHUNK_SECONDS", "").strip()
+    if raw:
+        try:
+            sec = float(raw)
+            if sec > 0:
+                chunk_samples = min(chunk_samples, max(1, int(round(sec * sample_rate))))
+        except ValueError:
+            pass
+    return chunk_samples
 
 
 def _min_tail_samples(sample_rate: int = 16000) -> int:
@@ -782,41 +871,25 @@ def parse_timestamp_tokens(
     return full, segments
 
 
-def decode_samples(
+def decode_from_cross_kv(
     model: RKNNModel,
     id2token: dict,
-    samples: np.ndarray,
-    verbose: bool = True,
+    cross_kv,
     *,
+    verbose: bool = True,
     timestamps: bool = False,
     time_offset: float = 0.0,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
     collect_timings: bool = False,
+    wall_t0: Optional[float] = None,
 ) -> DecodeResult:
-    """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
+    """Autoregressive decode given precomputed encoder cross-attention KV."""
     timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
-    wall_t0 = time.perf_counter()
-
-    mel_t0 = time.perf_counter()
-    features = compute_features(
-        samples,
-        n_mels=model.n_mels,
-        target_frames=model.mel_time_frames,
-    )
-    if timings is not None:
-        timings.mel_ms = (time.perf_counter() - mel_t0) * 1000.0
-
-    if verbose:
-        print(features.shape)
-
-    enc_t0 = time.perf_counter()
-    cross_kv = model.run_encoder(features)
-    if timings is not None:
-        timings.encoder_ms = (time.perf_counter() - enc_t0) * 1000.0
+    if wall_t0 is None:
+        wall_t0 = time.perf_counter()
 
     self_kv = model.get_self_cache()
-
     sot = model.sot_sequence_for(timestamps, task=task, language=language)
     offset = np.array([0], dtype=np.int32)
     out = None
@@ -837,18 +910,15 @@ def decode_samples(
 
     assert out is not None
     logits = np.asarray(out[0][0, 0], dtype=np.float32).copy()
-    # Force first emitted token to be a timestamp when timestamps are requested.
     if timestamps and model.timestamp_begin is not None:
         logits[: model.timestamp_begin] = -1e9
     idx = int(logits.argmax())
     ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
-    # Stop on EOT; hard ceiling is KV context (n_text_ctx). Optional soft cap via env.
     stop_at = resolve_decode_token_limit(model.n_text_ctx)
     stopped_on_repeat = False
 
     def _repeating_tail(tokens: List[int]) -> bool:
-        """Stop if the same 1–4 token pattern repeats at the end."""
         for n in (1, 2, 3, 4):
             need = n * max_ngram_repeats
             if len(tokens) < need:
@@ -900,9 +970,6 @@ def decode_samples(
             f"n_text_ctx={model.n_text_ctx} (no EOT)"
         )
 
-    if verbose:
-        print(ans)
-
     segments: Optional[List[TranscriptSegment]] = None
     if timestamps and model.timestamp_begin is not None:
         text, segments = parse_timestamp_tokens(
@@ -917,6 +984,65 @@ def decode_samples(
     if verbose:
         print(text)
     return DecodeResult(text=text, segments=segments, timings=timings, truncated=truncated)
+
+
+def decode_samples(
+    model: RKNNModel,
+    id2token: dict,
+    samples: np.ndarray,
+    verbose: bool = True,
+    *,
+    timestamps: bool = False,
+    time_offset: float = 0.0,
+    task: TaskType = "transcribe",
+    language: Optional[str] = None,
+    collect_timings: bool = False,
+) -> DecodeResult:
+    """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
+    timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
+    wall_t0 = time.perf_counter()
+
+    mel_t0 = time.perf_counter()
+    features = compute_features(
+        samples,
+        n_mels=model.n_mels,
+        target_frames=model.mel_time_frames,
+    )
+    if timings is not None:
+        timings.mel_ms = (time.perf_counter() - mel_t0) * 1000.0
+
+    if verbose:
+        print(features.shape)
+
+    enc_t0 = time.perf_counter()
+    cross_kv = model.run_encoder(features)
+    if timings is not None:
+        timings.encoder_ms = (time.perf_counter() - enc_t0) * 1000.0
+
+    decoded = decode_from_cross_kv(
+        model,
+        id2token,
+        cross_kv,
+        verbose=verbose,
+        timestamps=timestamps,
+        time_offset=time_offset,
+        task=task,
+        language=language,
+        collect_timings=collect_timings,
+        wall_t0=wall_t0,
+    )
+    if timings is not None and decoded.timings is not None:
+        timings.decoder_ms = decoded.timings.decoder_ms
+        timings.tokens = decoded.timings.tokens
+        timings.decoder_calls = decoded.timings.decoder_calls
+        timings.truncated = decoded.timings.truncated
+        timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+    return DecodeResult(
+        text=decoded.text,
+        segments=decoded.segments,
+        timings=timings,
+        truncated=decoded.truncated,
+    )
 
 
 def resolve_decode_token_limit(n_text_ctx: int) -> int:
@@ -1049,6 +1175,169 @@ def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[
     return spans, hop, sample_rate
 
 
+def decode_utterance_parallel(
+    model: RKNNModel,
+    id2token: dict,
+    samples: np.ndarray,
+    verbose: bool = True,
+    *,
+    timestamps: bool = False,
+    task: TaskType = "transcribe",
+    language: Optional[str] = None,
+    on_chunk: Optional[Callable[[DecodeResult], None]] = None,
+    collect_timings: bool = False,
+    wall_t0: Optional[float] = None,
+) -> DecodeResult:
+    """
+    VAD-fixed spans in RAM + parallel NPU encode (encoder pool) + sequential CPU decode.
+    """
+    from app.speech_cut import chunk_audio_views, plan_voice_aware_chunks
+
+    if wall_t0 is None:
+        wall_t0 = time.perf_counter()
+    sample_rate = 16000
+    timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
+    if timings is not None:
+        timings.parallel_workers = model.encoder_workers
+
+    spans, _probs, vad_timings = plan_voice_aware_chunks(samples)
+    if timings is not None:
+        timings.vad_ms = vad_timings.vad_ms
+        timings.cut_ms = vad_timings.cut_ms
+
+    if verbose:
+        dur_s = samples.shape[0] / float(sample_rate)
+        print(
+            f"parallel vad: duration_s={dur_s:.2f} chunks={len(spans)} "
+            f"workers={model.encoder_workers} vad_ms={vad_timings.vad_ms:.1f}"
+        )
+
+    if len(spans) == 1:
+        return decode_samples(
+            model,
+            id2token,
+            samples,
+            verbose=verbose,
+            timestamps=timestamps,
+            task=task,
+            language=language,
+            collect_timings=collect_timings,
+        )
+
+    chunk_audio = chunk_audio_views(samples, spans)
+    mels: List[np.ndarray] = []
+    mel_t0 = time.perf_counter()
+    for i, chunk in enumerate(chunk_audio):
+        if verbose:
+            span = spans[i]
+            print(
+                f"chunk {i + 1}/{len(spans)} samples={len(chunk)} "
+                f"start={span.start} ({span.start / sample_rate:.2f}s) reason={span.reason}"
+            )
+        mels.append(
+            compute_features(
+                chunk,
+                n_mels=model.n_mels,
+                target_frames=model.mel_time_frames,
+            )
+        )
+    if timings is not None:
+        timings.mel_ms = (time.perf_counter() - mel_t0) * 1000.0
+
+    encode_futures = []
+    if model._encoder_pool is not None:
+        for i, mel in enumerate(mels):
+            encode_futures.append(model._encoder_pool.submit(i, mel))
+    else:
+        encode_futures = None
+
+    parts: List[str] = []
+    all_segments: List[TranscriptSegment] = []
+    any_truncated = False
+    enc_started_at: List[float] = []
+    enc_finished_at: List[float] = []
+
+    for i, span in enumerate(spans):
+        if encode_futures is not None:
+            enc_result = encode_futures[i].result()
+            cross_kv = enc_result.cross_kv
+            if timings is not None:
+                # Real queue wait (submit → worker start), not future.result() block.
+                timings.encode_queue_wait_ms += enc_result.queue_wait_ms
+                # Sum of pure NPU inference time across chunks.
+                timings.encoder_ms += enc_result.encode_ms
+                enc_started_at.append(enc_result.started_at)
+                enc_finished_at.append(enc_result.finished_at)
+        else:
+            enc_t0 = time.perf_counter()
+            cross_kv = model.run_encoder(mels[i])
+            if timings is not None:
+                elapsed = (time.perf_counter() - enc_t0) * 1000.0
+                timings.encoder_ms += elapsed
+                timings.encoder_wall_ms += elapsed
+
+        time_offset = span.start / float(sample_rate)
+        result = decode_from_cross_kv(
+            model,
+            id2token,
+            cross_kv,
+            verbose=verbose,
+            timestamps=timestamps,
+            time_offset=time_offset,
+            task=task,
+            language=language,
+            collect_timings=collect_timings,
+        )
+        any_truncated = any_truncated or result.truncated
+        if timings is not None and result.timings is not None:
+            timings.decoder_ms += result.timings.decoder_ms
+            timings.tokens += result.timings.tokens
+            timings.decoder_calls += result.timings.decoder_calls
+            timings.truncated = timings.truncated or result.timings.truncated
+
+        if on_chunk is not None and result.text:
+            on_chunk(result)
+
+        if timestamps and result.segments is not None:
+            all_segments.extend(result.segments)
+            if result.text:
+                parts.append(result.text)
+        elif result.text:
+            parts.append(result.text)
+
+    if timings is not None:
+        timings.chunks = len(spans)
+        timings.truncated = timings.truncated or any_truncated
+        if enc_started_at and enc_finished_at:
+            # Wall clock of the parallel encode wave (first start → last finish).
+            timings.encoder_wall_ms = (
+                max(enc_finished_at) - min(enc_started_at)
+            ) * 1000.0
+
+    if timestamps:
+        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(parts)
+        segments: Optional[List[TranscriptSegment]] = all_segments
+    else:
+        text = stitch_transcripts(parts)
+        segments = None
+
+    if verbose:
+        print(text)
+
+    if timings is not None:
+        timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+        duration_s = samples.shape[0] / float(sample_rate)
+        if duration_s > 0:
+            timings.rtf = (timings.wall_ms / 1000.0) / duration_s
+
+    return DecodeResult(
+        text=text,
+        segments=segments,
+        timings=timings,
+        truncated=any_truncated,
+    )
+
+
 def decode_utterance(
     model: RKNNModel,
     id2token: dict,
@@ -1081,6 +1370,24 @@ def decode_utterance(
         samples = load_audio_16k_mono(audio)
     if timings is not None:
         timings.audio_ms = (time.perf_counter() - audio_t0) * 1000.0
+
+    sample_rate = 16000
+    chunk_samples = _max_chunk_samples(model, sample_rate)
+    n = int(samples.shape[0])
+
+    if parallel_encode_enabled() and n > chunk_samples:
+        return decode_utterance_parallel(
+            model,
+            id2token,
+            samples,
+            verbose=verbose,
+            timestamps=timestamps,
+            task=task,
+            language=language,
+            on_chunk=on_chunk,
+            collect_timings=collect_timings,
+            wall_t0=wall_t0,
+        )
 
     sample_rate, chunk_samples, overlap_samples = _utterance_window_params(model)
     hop = chunk_samples - overlap_samples if overlap_samples else chunk_samples

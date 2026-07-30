@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -27,12 +28,15 @@ from app.decode import (
     load_audio_16k_mono,
     load_tokens,
     model_config_from_encoder_path,
+    parallel_encode_enabled,
     resolve_decoder_backend,
     resolve_librknnrt_path,
     stitch_transcripts,
 )
+from app.encode_pool import resolve_encoder_worker_count
 from app.openai_response import format_transcription_response, stream_sse_frames
 from app.system_memory import (
+    estimate_encoder_pool_ram_bytes,
     estimate_model_ram_bytes,
     estimate_request_ram_bytes,
     has_enough_ram,
@@ -165,7 +169,28 @@ def _load_model_sync() -> None:
     )
     print(f"decoder: backend={backend} path={resolved_decoder}")
 
-    model_ram_need = estimate_model_ram_bytes(_encoder_path, resolved_decoder)
+    n_workers = 1
+    if parallel_encode_enabled():
+        n_workers = resolve_encoder_worker_count(
+            _encoder_path,
+            decoder_path=resolved_decoder,
+        )
+        if n_workers < 1:
+            need1 = estimate_encoder_pool_ram_bytes(_encoder_path, resolved_decoder, 1)
+            ok1, reason1 = has_enough_ram(need1, context="model RSS (1 encoder)")
+            raise RuntimeError(
+                reason1
+                or f"insufficient RAM for encoder pool (need ~{need1 // (1024*1024)} MiB)"
+            )
+        model_ram_need = estimate_encoder_pool_ram_bytes(
+            _encoder_path, resolved_decoder, n_workers
+        )
+        print(
+            f"encoder_pool: MemAvailable pick={n_workers} "
+            f"(~{model_ram_need // (1024 * 1024)} MiB RSS est.; NPU may reduce)"
+        )
+    else:
+        model_ram_need = estimate_model_ram_bytes(_encoder_path, resolved_decoder)
     ok, reason = has_enough_ram(model_ram_need, context="model RSS")
     print(model_ram_check_message(model_ram_need))
     if not ok:
@@ -200,7 +225,18 @@ def _load_model_sync() -> None:
         timestamp_begin=timestamp_begin,
         verbose=False,
         decoder_backend=backend,
+        encoder_workers=n_workers if parallel_encode_enabled() else None,
     )
+    if parallel_encode_enabled():
+        from app.speech_cut import preload_vad, resolve_vad_model_path
+
+        t0 = time.perf_counter()
+        preload_vad()
+        vad_ms = (time.perf_counter() - t0) * 1000.0
+        print(
+            f"encoder_pool: {_model.encoder_workers} worker(s); "
+            f"silero_vad ready ({resolve_vad_model_path()}, {vad_ms:.0f} ms)"
+        )
     from app.auth import auth_enabled
 
     if auth_enabled():
@@ -218,6 +254,9 @@ async def lifespan(_app: FastAPI):
     if _model is not None:
         await loop.run_in_executor(None, _model.release)
         _model = None
+    from app.speech_cut import release_vad
+
+    release_vad()
 
 
 app = FastAPI(

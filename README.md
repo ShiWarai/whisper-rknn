@@ -116,6 +116,8 @@ whisper-rknn/
 │   ├── openai_response.py    # response_format / SSE helpers
 │   ├── system_memory.py      # MemAvailable RAM forecast
 │   ├── decode.py             # RKNN encoder, chunking, decode loop
+│   ├── encode_pool.py        # parallel NPU encoder workers
+│   ├── speech_cut.py         # Silero VAD spans in RAM
 │   ├── onnx_decoder.py       # CPU ONNX decoder (hybrid)
 │   ├── audio_features.py     # mel-спектрограмма (numpy + knf)
 │   ├── whisper_languages.py  # language token ids без openai-whisper
@@ -139,6 +141,9 @@ whisper-rknn/
 ├── scripts/
 │   ├── docker-entrypoint.sh
 │   └── download_models.sh
+├── samples/                  # локальные записи (gitignore)
+│   ├── audio/
+│   └── vad_out/
 ├── docker-compose.dev.yml
 └── requirements.txt
 ```
