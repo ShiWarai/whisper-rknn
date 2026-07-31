@@ -17,6 +17,7 @@ from app.decode import (
     TranscriptSegment,
     _merge_short_tail_spans,
     _next_chunk_start,
+    apply_timestamp_rules,
     build_sot_sequence,
     causal_mask_1d,
     iter_audio_chunk_spans,
@@ -289,6 +290,77 @@ def test_parse_timestamp_tokens_segments():
     assert len(segments) == 2
     assert segments[0] == TranscriptSegment(start=10.0, end=11.0, text="hello world")
     assert segments[1] == TranscriptSegment(start=11.0, end=12.0, text="bye")
+
+
+_TURBO_EOT = 50257
+_TURBO_TS_BEGIN = 50365
+_TURBO_NO_TS = 50364
+_VOCAB = 51866
+
+
+def _turbo_rules_kwargs() -> dict:
+    return {
+        "eot": _TURBO_EOT,
+        "timestamp_begin": _TURBO_TS_BEGIN,
+        "notimestamps_id": _TURBO_NO_TS,
+    }
+
+
+def _blank_logits() -> np.ndarray:
+    return np.zeros(_VOCAB, dtype=np.float32)
+
+
+def test_apply_timestamp_rules_empty_sampled_forces_timestamp():
+    logits = _blank_logits()
+    logits[100] = 5.0
+    logits[_TURBO_TS_BEGIN + 10] = 1.0
+    masked = apply_timestamp_rules(logits, [], **_turbo_rules_kwargs())
+    assert masked[: _TURBO_TS_BEGIN].max() <= -1e8
+    assert int(masked.argmax()) == _TURBO_TS_BEGIN + 10
+
+
+def test_apply_timestamp_rules_after_closing_timestamp_blocks_text():
+    logits = _blank_logits()
+    ts_close = _TURBO_TS_BEGIN + 50
+    sampled = [_TURBO_TS_BEGIN + 0, 100, ts_close]
+    logits[100] = 10.0
+    logits[_TURBO_EOT] = 1.0
+    logits[ts_close + 5] = 2.0
+    masked = apply_timestamp_rules(logits, sampled, **_turbo_rules_kwargs())
+    assert masked[100] <= -1e8
+    assert int(masked.argmax()) in {_TURBO_EOT, ts_close + 5}
+
+
+def test_apply_timestamp_rules_after_double_timestamp_blocks_timestamps():
+    logits = _blank_logits()
+    sampled = [_TURBO_TS_BEGIN + 0, _TURBO_TS_BEGIN + 50]
+    logits[200] = 3.0
+    logits[_TURBO_TS_BEGIN + 60] = 10.0
+    masked = apply_timestamp_rules(logits, sampled, **_turbo_rules_kwargs())
+    assert masked[_TURBO_TS_BEGIN:].max() <= -1e8
+    assert int(masked.argmax()) == 200
+
+
+def test_apply_timestamp_rules_monotonic_timestamps():
+    logits = _blank_logits()
+    ts_last = _TURBO_TS_BEGIN + 50
+    sampled = [_TURBO_TS_BEGIN + 10, 100, ts_last]
+    logits[_TURBO_TS_BEGIN + 30] = 10.0
+    logits[ts_last + 5] = 1.0
+    masked = apply_timestamp_rules(logits, sampled, **_turbo_rules_kwargs())
+    assert masked[_TURBO_TS_BEGIN + 30] <= -1e8
+    assert int(masked.argmax()) in {_TURBO_EOT, ts_last + 5}
+
+
+def test_apply_timestamp_rules_logsumexp_prefers_timestamp_mass():
+    logits = _blank_logits()
+    sampled = [_TURBO_TS_BEGIN + 10, 100, _TURBO_TS_BEGIN + 50]
+    logits[200] = 0.0
+    for i in range(10):
+        logits[_TURBO_TS_BEGIN + 60 + i] = 2.0
+    masked = apply_timestamp_rules(logits, sampled, **_turbo_rules_kwargs())
+    assert masked[200] <= -1e8
+    assert int(masked.argmax()) >= _TURBO_TS_BEGIN
 
 
 def _write_test_wav(path: str, sample_rate: int = 48000, duration_s: float = 0.1) -> None:

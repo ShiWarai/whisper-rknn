@@ -12,7 +12,40 @@ from app.core.model_config import ModelProfile
 from app.core.text import stitch_transcripts
 from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
 from app.pipeline.chunks import plan_utterance_chunks, utterance_mels
-from app.pipeline.transport import ChunkTransport
+from app.pipeline.chunk_transport import ChunkTransport
+
+_SAMPLE_RATE = 16000
+
+
+def _merge_timings(
+    timings: Optional[DecodeTimings],
+    result: DecodeResult,
+) -> None:
+    if timings is None or result.timings is None:
+        return
+    timings.encoder_ms += result.timings.encoder_ms
+    timings.decoder_ms += result.timings.decoder_ms
+    timings.tokens += result.timings.tokens
+    timings.decoder_calls += result.timings.decoder_calls
+    timings.truncated = timings.truncated or result.truncated
+
+
+def _finalize_timings(
+    timings: Optional[DecodeTimings],
+    *,
+    wall_t0: float,
+    n_samples: int,
+    chunks: int,
+    truncated: bool,
+) -> None:
+    if timings is None:
+        return
+    timings.chunks = chunks
+    timings.truncated = truncated
+    timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
+    duration_s = n_samples / float(_SAMPLE_RATE)
+    if duration_s > 0:
+        timings.rtf = (timings.wall_ms / 1000.0) / duration_s
 
 
 async def run_utterance_pipeline(
@@ -28,7 +61,6 @@ async def run_utterance_pipeline(
 ) -> DecodeResult:
     wall_t0 = time.perf_counter()
     timings = DecodeTimings(decoder_backend="onnx") if collect_timings else None
-    sample_rate = 16000
 
     plan = plan_utterance_chunks(samples, profile)
     if timings is not None:
@@ -54,17 +86,16 @@ async def run_utterance_pipeline(
             timings.tokens = result.timings.tokens
             timings.decoder_calls = result.timings.decoder_calls
             timings.truncated = result.truncated
-            timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
-            duration_s = samples.shape[0] / float(sample_rate)
-            if duration_s > 0:
-                timings.rtf = (timings.wall_ms / 1000.0) / duration_s
-            result.timings = timings
         elif timings is not None:
             timings.truncated = result.truncated
-            timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
-            duration_s = samples.shape[0] / float(sample_rate)
-            if duration_s > 0:
-                timings.rtf = (timings.wall_ms / 1000.0) / duration_s
+        _finalize_timings(
+            timings,
+            wall_t0=wall_t0,
+            n_samples=int(samples.shape[0]),
+            chunks=1,
+            truncated=bool(result.truncated),
+        )
+        if timings is not None:
             result.timings = timings
         if on_chunk is not None and result.text:
             on_chunk(result)
@@ -74,7 +105,7 @@ async def run_utterance_pipeline(
         return await transport.encode_then_decode(
             mel,
             chunk_id=chunk_id,
-            time_offset_sec=span.start / float(sample_rate),
+            time_offset_sec=span.start / float(_SAMPLE_RATE),
             task=task,
             language=language,
             timestamps=timestamps,
@@ -95,36 +126,28 @@ async def run_utterance_pipeline(
         any_truncated = any_truncated or result.truncated
         if on_chunk is not None and result.text:
             on_chunk(result)
-        if timings is not None and result.timings is not None:
-            timings.encoder_ms += result.timings.encoder_ms
-            timings.decoder_ms += result.timings.decoder_ms
-            timings.tokens += result.timings.tokens
-            timings.decoder_calls += result.timings.decoder_calls
-
-        response_text = result.text
-        if timestamps and result.segments:
+        _merge_timings(timings, result)
+        if timestamps and result.segments is not None:
             all_segments.extend(result.segments)
-            if response_text:
-                parts.append(response_text)
-        elif response_text:
-            parts.append(response_text)
+            if result.text:
+                parts.append(result.text)
+        elif result.text:
+            parts.append(result.text)
 
     if timestamps:
-        text = " ".join(segment.text for segment in all_segments).strip() or stitch_transcripts(
-            parts
-        )
-        segments: Optional[List[TranscriptSegment]] = all_segments
+        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(parts)
+        segments: Optional[List[TranscriptSegment]] = all_segments or None
     else:
         text = stitch_transcripts(parts)
         segments = None
 
-    if timings is not None:
-        timings.truncated = any_truncated
-        timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
-        duration_s = samples.shape[0] / float(sample_rate)
-        if duration_s > 0:
-            timings.rtf = (timings.wall_ms / 1000.0) / duration_s
-
+    _finalize_timings(
+        timings,
+        wall_t0=wall_t0,
+        n_samples=int(samples.shape[0]),
+        chunks=len(plan.spans),
+        truncated=any_truncated,
+    )
     return DecodeResult(
         text=text,
         segments=segments,
@@ -146,7 +169,6 @@ async def utterance_stream(
 
     plan = plan_utterance_chunks(samples, profile)
     mels = utterance_mels(samples, plan, profile)
-    sample_rate = 16000
 
     if len(plan.spans) == 1:
         result = await transport.encode_then_decode(
@@ -166,7 +188,7 @@ async def utterance_stream(
             result = await transport.encode_then_decode(
                 mel,
                 chunk_id=chunk_id,
-                time_offset_sec=span.start / float(sample_rate),
+                time_offset_sec=span.start / float(_SAMPLE_RATE),
                 task=task,
                 language=language,
                 timestamps=False,

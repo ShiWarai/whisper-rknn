@@ -14,7 +14,7 @@ import base64
 import os
 import time
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Tuple, Union
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -529,6 +529,92 @@ def parse_timestamp_tokens(
     return full, segments
 
 
+_LOGIT_MASK = -1e9
+# OpenAI default max_initial_timestamp=1.0s, precision=0.02s → index 50.
+_DEFAULT_MAX_INITIAL_TIMESTAMP_INDEX = 50
+
+
+def _logsumexp(values: np.ndarray) -> float:
+    vmax = float(np.max(values))
+    if not np.isfinite(vmax):
+        return vmax
+    shifted = values - vmax
+    return float(vmax + np.log(np.sum(np.exp(shifted))))
+
+
+def apply_timestamp_rules(
+    logits: np.ndarray,
+    sampled: Sequence[int],
+    *,
+    eot: int,
+    timestamp_begin: int,
+    notimestamps_id: Optional[int],
+    max_initial_timestamp_index: Optional[int] = _DEFAULT_MAX_INITIAL_TIMESTAMP_INDEX,
+) -> np.ndarray:
+    """
+    Numpy-порт OpenAI ``ApplyTimestampRules`` для одного greedy-шага.
+
+    ``sampled`` — токены, уже сгенерированные после SOT (аналог ``tokens[sample_begin:]``).
+  """
+    out = np.asarray(logits, dtype=np.float32).copy()
+    seq = list(sampled)
+
+    if notimestamps_id is not None:
+        out[notimestamps_id] = _LOGIT_MASK
+
+    last_was_timestamp = len(seq) >= 1 and seq[-1] >= timestamp_begin
+    penultimate_was_timestamp = len(seq) < 2 or seq[-2] >= timestamp_begin
+
+    if last_was_timestamp:
+        if penultimate_was_timestamp:
+            out[timestamp_begin:] = _LOGIT_MASK
+        else:
+            out[:eot] = _LOGIT_MASK
+
+    timestamps = [t for t in seq if t >= timestamp_begin]
+    if timestamps:
+        if last_was_timestamp and not penultimate_was_timestamp:
+            timestamp_last = timestamps[-1]
+        else:
+            timestamp_last = timestamps[-1] + 1
+        out[timestamp_begin:timestamp_last] = _LOGIT_MASK
+
+    if len(seq) == 0:
+        out[:timestamp_begin] = _LOGIT_MASK
+        if max_initial_timestamp_index is not None:
+            last_allowed = timestamp_begin + max_initial_timestamp_index
+            out[last_allowed + 1 :] = _LOGIT_MASK
+
+    # log_softmax по уже замаскированным logits
+    shifted = out - np.max(out)
+    logprobs = shifted - _logsumexp(shifted)
+    timestamp_logprob = _logsumexp(logprobs[timestamp_begin:])
+    max_text_token_logprob = float(np.max(logprobs[:timestamp_begin]))
+    if timestamp_logprob > max_text_token_logprob:
+        out[:timestamp_begin] = _LOGIT_MASK
+
+    return out
+
+
+def _select_next_token(
+    logits: np.ndarray,
+    *,
+    timestamps: bool,
+    sampled: Sequence[int],
+    model: RKNNModel,
+) -> int:
+    arr = np.asarray(logits, dtype=np.float32).copy()
+    if timestamps and model.timestamp_begin is not None:
+        arr = apply_timestamp_rules(
+            arr,
+            sampled,
+            eot=model.eot,
+            timestamp_begin=model.timestamp_begin,
+            notimestamps_id=model.notimestamps_id,
+        )
+    return int(arr.argmax())
+
+
 def decode_from_cross_kv(
     model: RKNNModel,
     id2token: dict,
@@ -567,10 +653,12 @@ def decode_from_cross_kv(
         offset += 1
 
     assert out is not None
-    logits = np.asarray(out[0][0, 0], dtype=np.float32).copy()
-    if timestamps and model.timestamp_begin is not None:
-        logits[: model.timestamp_begin] = -1e9
-    idx = int(logits.argmax())
+    idx = _select_next_token(
+        out[0][0, 0],
+        timestamps=timestamps,
+        sampled=[],
+        model=model,
+    )
     ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
     stop_at = resolve_decode_token_limit(model.n_text_ctx)
@@ -614,7 +702,12 @@ def decode_from_cross_kv(
         for i in range(1, len(out)):
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
-        idx = int(out[0][0, 0].argmax())
+        idx = _select_next_token(
+            out[0][0, 0],
+            timestamps=timestamps,
+            sampled=ans,
+            model=model,
+        )
 
     truncated = idx != model.eot and not stopped_on_repeat and offset.item() >= stop_at
     if timings is not None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional
 
 import numpy as np
 
@@ -13,21 +13,14 @@ from app.core.grpc_gen.whisper_rknn.v1 import worker_pb2
 from app.core.model_config import ModelProfile
 from app.core.tensor_codec import ndarray_to_tensor
 from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
+from app.pipeline.chunk_transport import ChunkTransport
 
-
-@runtime_checkable
-class ChunkTransport(Protocol):
-    async def encode_then_decode(
-        self,
-        mel: np.ndarray,
-        *,
-        chunk_id: int,
-        time_offset_sec: float,
-        task: TaskType,
-        language: Optional[str],
-        timestamps: bool,
-        collect_timings: bool = False,
-    ) -> DecodeResult: ...
+__all__ = [
+    "ChunkTransport",
+    "GrpcChunkTransport",
+    "LocalChunkTransport",
+    "decode_response_to_result",
+]
 
 
 def decode_response_to_result(
