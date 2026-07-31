@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from app.encode_pool import allowed_npu_core_masks, core_mask_for_worker, core_mask_name, dedicated_npu_core_masks
+from app.encode_pool import (
+    allowed_npu_core_masks,
+    core_mask_for_worker,
+    core_mask_name,
+    dedicated_npu_core_masks,
+)
 
 
 def test_dedicated_masks_are_single_cores():

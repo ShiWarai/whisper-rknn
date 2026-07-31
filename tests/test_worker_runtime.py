@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.encode_pool import allowed_npu_core_masks, core_mask_for_worker, dedicated_npu_core_masks
+from app.encode_pool import allowed_npu_core_masks, core_mask_for_worker
 from app.worker_runtime import parse_cpu_affinity, resolve_onnx_intra_op_threads
 
 
