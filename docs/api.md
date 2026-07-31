@@ -1,14 +1,21 @@
 # API
 
-HTTP API сервиса `whisper-rknn-api` (FastAPI). По умолчанию слушает `0.0.0.0:8080` **внутри** Docker-сети (порты на хост не публикуются). Порт переопределяется через `PORT` в `.env` (для связки с ботом — `9003`).
+HTTP API сервиса `whisper-rknn-api` (FastAPI). Контракт совместим с [hwdsl2/docker-whisper](https://github.com/hwdsl2/docker-whisper) (OpenAI Audio API): один и тот же клиент может переключаться между NPU (`whisper-rknn`) и CPU (`hwdsl2/whisper-server`) сменой контейнера.
 
-Язык распознавания задаётся **не** в запросе, а переменной окружения **`WHISPER_LANGUAGE`** в `.env` сервиса (по умолчанию `ru`). См. [docs/models.md](models.md).
+По умолчанию слушает `0.0.0.0:8080` **внутри** Docker-сети. Порт переопределяется через `PORT` в `.env` (для связки с ботом — `9003`).
 
 Базовый URL в compose-сети: `http://whisper-rknn-api:${PORT}` (пример ниже — с `PORT=9003`).
 
+OpenAI SDK / клиенты:
+
+```bash
+export OPENAI_BASE_URL=http://whisper-rknn-api:9003/v1
+export OPENAI_API_KEY=your-key-or-any-non-empty
+```
+
 ## Авторизация (OpenAI-совместимая)
 
-Если задан **`WHISPER_API_KEY`** (или **`OPENAI_API_KEY`** как alias), эндпоинт `POST /transcribe` требует заголовок:
+Если задан **`WHISPER_API_KEY`** (или **`OPENAI_API_KEY`** как alias), защищённые эндпоинты требуют заголовок:
 
 ```http
 Authorization: Bearer <ваш_ключ>
@@ -18,7 +25,7 @@ Authorization: Bearer <ваш_ключ>
 
 `GET /health` остаётся без авторизации (healthcheck / мониторинг).
 
-Если ключ **не задан**, API открыт (как раньше) — удобно для изолированной Docker-сети.
+Если ключ **не задан**, API открыт — удобно для изолированной Docker-сети.
 
 **401** (тело в стиле OpenAI):
 
@@ -37,9 +44,9 @@ Authorization: Bearer <ваш_ключ>
 
 ## Предобработка аудио
 
-Загруженный файл декодируется **in-process** через **PyAV** (libav API, prebuilt wheel в образе) в **16 kHz mono float32** в RAM (без промежуточного WAV на диске).
+Загруженный файл декодируется **in-process** через **PyAV** (libav API) в **16 kHz mono float32** в RAM.
 
-Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe (аварийный путь). Переопределение fallback-бинарника: `FFMPEG_BIN` в `.env`.
+Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопределение: `FFMPEG_BIN` в `.env`.
 
 ## `GET /health`
 
@@ -48,16 +55,34 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe (аварийн�
 **Ответ 200**
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "model": "turbo" }
 ```
 
-Пока модель загружается при старте:
+Пока модель загружается:
 
 ```json
 { "status": "loading" }
 ```
 
-## `POST /transcribe`
+## `GET /v1/models`
+
+Список активной модели (OpenAI-совместимый формат). Требует Bearer, если задан `WHISPER_API_KEY`.
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "turbo",
+      "object": "model",
+      "created": 0,
+      "owned_by": "whisper-rknn"
+    }
+  ]
+}
+```
+
+## `POST /v1/audio/transcriptions`
 
 Распознавание речи из загруженного аудиофайла.
 
@@ -66,84 +91,149 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe (аварийн�
 | Поле | Тип | По умолчанию | Смысл |
 |------|-----|--------------|-------|
 | `file` | file | — | Аудиофайл |
-| `timestamps` | bool | `false` | Сегментные метки времени Whisper (`start`/`end`) для сопоставления с кадрами видео |
+| `model` | string | `whisper-1` | Принимается, фактически используется профиль из `WHISPER_MODEL_PROFILE` |
+| `language` | string | из `WHISPER_LANGUAGE` | BCP-47 / код Whisper (`ru`, `en`, …); `auto` — как в env |
+| `prompt` | string | — | Принимается для совместимости, RKNN-декодер пока игнорирует |
+| `response_format` | string | `json` | `json`, `text`, `verbose_json`, `srt`, `vtt` |
+| `temperature` | float | `0` | Принимается (RKNN greedy) |
+| `stream` | bool | `false` | SSE-поток по протоколу OpenAI |
+| `timestamp_granularities[]` | array | `segment` | Только `segment`; `word` → **400** |
 
-Поддерживаемые форматы (через PyAV / libav): ogg, wav, mp3, m4a, flac, opus, webm и др.
+Поддерживаемые форматы: ogg, wav, mp3, m4a, flac, opus, webm и др.
 
 **Лимит размера:** `MAX_UPLOAD_MB` (по умолчанию 25 MB).
 
-### Защита от OOM (RAM)
+### `response_format`
 
-Перед декодированием сервис сравнивает консервативную оценку пика RAM запроса (тело файла + PCM + mel + KV decoder) с **`MemAvailable`** из `/proc/meminfo`. При нехватке памяти — **507** (клиент может уменьшить файл или подождать).
+| Значение | Ответ |
+|----------|-------|
+| `json` | `{"text": "..."}` |
+| `text` | plain text |
+| `verbose_json` | JSON с `task`, `language`, `duration`, `text`, `segments[]`, `timings` (стадии decode) |
+| `srt` | SubRip |
+| `vtt` | WebVTT |
 
-Оценка PCM ограничена `WHISPER_MAX_AUDIO_SECONDS` (по умолчанию `600` с). При старте контейнера аналогичная проверка выполняется перед загрузкой `.rknn` (если RAM мало — сервис не станет ready).
+Для `verbose_json`, `srt`, `vtt` декодер включает сегментные метки времени Whisper.
+
+### Streaming (`stream=true`)
+
+Работает для **`POST /v1/audio/transcriptions`** и **`POST /v1/audio/translations`**.
+
+| Поле | Тип | По умолчанию | Смысл |
+|------|-----|--------------|-------|
+| `stream` | bool/string | `false` | `true` → SSE (`text/event-stream`) |
+
+При `stream=true` поле `response_format` не используется (как у hwdsl2): ответ всегда поток событий, финальный текст в `transcript.text.done`.
+
+Ответ: `text/event-stream`, протокол OpenAI:
+
+```
+data: {"type":"transcript.text.delta","delta":"..."}
+
+data: {"type":"transcript.text.done","text":"полный текст"}
+
+data: [DONE]
+```
+
+На RKNN дельты приходят после каждого chunk-окна (~30 с), не по словам. Для файла короче 30 с — одна дельта.
+
+## `POST /v1/audio/translations`
+
+Перевод аудио на английский. Те же параметры, что у transcriptions (кроме `timestamp_granularities` на translations — всегда segment).
+
+Не поддерживается для English-only моделей (`.en`) — **400**.
+
+Streaming (`stream=true`) — тот же SSE-протокол, что у transcriptions.
+
+```bash
+curl -s -F "file=@voice.ogg" -F "model=whisper-1" -F "language=ru" -F "stream=true" \
+  http://whisper-rknn-api:9003/v1/audio/translations
+```
+
+## Inference
+
+По умолчанию **гибрид**: RKNN encoder на NPU, ONNX decoder на CPU (`onnxruntime`).
+
+Декодирование останавливается по **EOT** или при заполнении KV (`n_text_ctx=448`). При обрыве длинного окна без EOT следующий chunk начинается раньше (adaptive seek).
+
+## Защита от OOM (RAM)
+
+Перед декодированием сервис сравнивает оценку пика RAM с **`MemAvailable`**. При нехватке — **507**.
+
+Оценка PCM ограничена `WHISPER_MAX_AUDIO_SECONDS` (по умолчанию `600` с).
 
 ### Длинное аудио (>30 с)
 
-Статическое окно RKNN — **3000 mel-кадров (~30 с)**. Более длинные файлы:
-
-1. Режутся на скользящие окна того же размера (вход encoder ≤ 3000 кадров).
-2. Каждое окно декодируется отдельно.
-3. Тексты **склеиваются** с удалением дубликата на стыке (suffix/prefix по словам).
+Статическое окно RKNN — **3000 mel-кадров (~30 с)**. Более длинные файлы режутся на скользящие окна и склеиваются.
 
 | Переменная | По умолчанию | Смысл |
 |------------|--------------|-------|
-| `WHISPER_CHUNK_SECONDS` | ~30 (окно модели) | Длина окна в секундах (не больше 30) |
-| `WHISPER_CHUNK_OVERLAP_SECONDS` | `5` | Перекрытие соседних окон; `0` — без overlap |
-| `WHISPER_MAX_NGRAM_REPEAT` | `6` | Стоп при зацикливании повторяющихся токенов |
+Поле `timings` в `verbose_json` (и в логах API): `audio_ms`, `mel_ms`, `encoder_ms`, `decoder_ms`, `tokens`, `decoder_calls`, `chunks`, `wall_ms`, `rtf`, `decoder_backend`, `truncated`.
 
-Переменные задаются в `.env` (пробрасываются через `docker-compose.yml`).
+## Переменные окружения
 
-**Ответ 200**
+Шаблон для `.env`: [`.env.example`](../.env.example). Модельные пути, язык, NPU, автозагрузка — в [models.md](models.md#переменные-окружения).
 
-```json
-{
-  "text": "распознанный текст",
-  "elapsed_s": 1.234,
-  "segments": null
-}
-```
+| Переменная | По умолчанию | Смысл |
+|------------|--------------|-------|
+| `HOST` / `PORT` | `0.0.0.0` / `8080` | Прослушивание внутри контейнера (в compose обычно `PORT=9003`) |
+| `MAX_UPLOAD_MB` | `25` | Лимит тела `POST /v1/audio/*` |
+| `WHISPER_MAX_AUDIO_SECONDS` | `600` | Потолок длительности для оценки RAM; при нехватке MemAvailable — **507** |
+| `WHISPER_API_KEY` | — | Bearer-ключ (alias: `OPENAI_API_KEY`); пусто = без auth |
+| `WHISPER_CHUNK_SECONDS` | ~30 | Длина окна (не больше 30 mel-кадров) |
+| `WHISPER_CHUNK_OVERLAP_SECONDS` | `2` | Перекрытие соседних окон; `0` — встык |
+| `WHISPER_MIN_TAIL_SECONDS` | `8` | Короткий хвост не гоняется отдельным окном |
+| `WHISPER_MAX_DECODE_TOKENS` | `0` | `0`/`auto` = до EOT в `n_text_ctx` (448); число — мягкий потолок |
+| `WHISPER_TRUNCATE_RETRY_SECONDS` | `10` | При обрыве без EOT — переслушать хвост |
+| `WHISPER_MAX_NGRAM_REPEAT` | `6` | Стоп при зацикливании n-грамм в декодере |
 
-С `timestamps=true` поле `segments` заполняется (секунды от начала дорожки):
-
-```json
-{
-  "text": "Ну что ты орешь… Люся, дорогой…",
-  "elapsed_s": 12.5,
-  "segments": [
-    { "start": 0.0, "end": 2.4, "text": "Ну что ты орешь…" },
-    { "start": 2.4, "end": 5.2, "text": "Люся, дорогой…" }
-  ]
-}
-```
-
-Метки — **сегментные** (фразы), не по словам. Удобно отдавать VLM вместе с кадрами, чтобы сопоставить речь и картинку по таймлайну.
-**Ошибки**
+## Ошибки
 
 | Код | Причина |
 |-----|---------|
 | 413 | Файл слишком большой |
-| 507 | Недостаточно свободной RAM для этого запроса (прогноз по MemAvailable) |
-| 401 | Нет или неверный `Authorization: Bearer` (если задан `WHISPER_API_KEY`) |
+| 507 | Недостаточно свободной RAM (NPU-расширение) |
+| 401 | Нет или неверный Bearer |
 | 503 | Модель ещё не загружена |
-| 400 | Некорректное аудио или ошибка декодирования |
+| 400 | Некорректное аудио, неподдерживаемый параметр |
 
 ## Примеры
 
-Из контейнера в той же сети `whisper_rknn_default`:
-
 ```bash
+# health
 docker run --rm --network whisper_rknn_default curlimages/curl:latest \
   -s http://whisper-rknn-api:9003/health
 
+# транскрипция (json)
 docker run --rm --network whisper_rknn_default \
   -v /path/to/audio:/data:ro \
   curlimages/curl:latest \
   -s -H "Authorization: Bearer $WHISPER_API_KEY" \
   -F "file=@/data/voice.ogg" \
-  -F "timestamps=true" \
-  http://whisper-rknn-api:9003/transcribe
+  -F "model=whisper-1" \
+  -F "language=ru" \
+  http://whisper-rknn-api:9003/v1/audio/transcriptions
+
+# verbose_json с сегментами
+curl -s -H "Authorization: Bearer $WHISPER_API_KEY" \
+  -F "file=@voice.ogg" \
+  -F "model=whisper-1" \
+  -F "response_format=verbose_json" \
+  http://whisper-rknn-api:9003/v1/audio/transcriptions
+
+# streaming
+curl -s -F "file=@voice.ogg" -F "model=whisper-1" -F "stream=true" \
+  http://whisper-rknn-api:9003/v1/audio/transcriptions
 ```
+
+## CPU ↔ NPU
+
+| Контейнер | Образ | Железо |
+|-----------|-------|--------|
+| NPU | `ghcr.io/shiwarai/whisper-rknn` | RK3588 |
+| CPU | `hwdsl2/whisper-server` | faster-whisper |
+
+Клиентский URL и multipart-поля одинаковые; меняется только hostname/compose-сервис.
 
 ## OpenAPI
 

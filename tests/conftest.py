@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 if "rknnlite" not in sys.modules:
     rknnlite = MagicMock()
     rknnlite.api = MagicMock()
@@ -19,3 +21,10 @@ if "rknnlite" not in sys.modules:
     sys.modules["rknnlite"] = rknnlite
     sys.modules["rknnlite.api"] = rknnlite.api
     sys.modules["rknnlite.api.rknn_runtime"] = MagicMock()
+
+
+@pytest.fixture(autouse=True)
+def _turbo_profile_env(monkeypatch):
+    """Default test/runtime profile matches production: large-v3-turbo."""
+    monkeypatch.setenv("WHISPER_MODEL_PROFILE", "turbo")
+    monkeypatch.setenv("WHISPER_LANGUAGE", "ru")

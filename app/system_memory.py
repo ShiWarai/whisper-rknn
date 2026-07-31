@@ -82,7 +82,7 @@ def estimate_request_ram_bytes(
     *,
     max_seconds: Optional[int] = None,
 ) -> int:
-    """Peak host RAM for one /transcribe request (intentionally high)."""
+    """Peak host RAM for one /v1/audio/transcriptions request (intentionally high)."""
     pcm_bytes = estimate_pcm_bytes(upload_bytes, max_seconds=max_seconds)
     mel_bytes = n_mels * MEL_TIME_FRAMES * BYTES_PER_FLOAT32
     kv_bytes = n_text_layer * 2 * n_text_ctx * n_text_state * BYTES_PER_FLOAT32
@@ -105,6 +105,59 @@ def has_enough_ram(required_bytes: int, *, context: str = "request peak") -> Tup
         f"(estimated {context}), MemAvailable ~{format_mib(avail)} MiB"
     )
     return False, reason
+
+
+def estimate_encoder_worker_ram_bytes(encoder_path: PathLike) -> int:
+    """RSS estimate for one RKNN encoder context (file × headroom)."""
+    size = file_size_bytes(encoder_path)
+    if size is None:
+        return 400 * 1024 * 1024
+    return int(size * MODEL_HEADROOM)
+
+
+def estimate_encoder_pool_ram_bytes(
+    encoder_path: PathLike,
+    decoder_path: Optional[PathLike] = None,
+    n_workers: int = 1,
+) -> int:
+    """
+    Host RSS estimate for decoder + N encoder RKNN contexts.
+
+    Mirrors video-descriptor ``estimateModelRamBytes`` (N × vision × 1.15 + llm).
+    """
+    n = max(1, n_workers)
+    total = estimate_encoder_worker_ram_bytes(encoder_path) * n
+    if decoder_path is not None:
+        dec = file_size_bytes(decoder_path)
+        if dec is not None:
+            total += int(dec * MODEL_HEADROOM)
+    return total
+
+
+def pick_encoder_worker_count(
+    encoder_path: PathLike,
+    *,
+    decoder_path: Optional[PathLike] = None,
+    max_workers: int = 3,
+    credit_bytes: int = 0,
+) -> int:
+    """
+    Largest encoder worker count that fits MemAvailable (video-descriptor
+    ``pickVisionWorkerCount``): try max → … → 1.
+
+    Returns 0 if even one worker does not fit. Unknown MemAvailable → try
+    ``max_workers`` (EncoderPool still probes down on NPU MALLOC_FAIL).
+    """
+    capped = max(1, int(max_workers))
+    avail = read_mem_available_bytes()
+    if avail is None:
+        return capped
+    avail_bytes = avail + max(0, credit_bytes)
+    for n in range(capped, 0, -1):
+        need = estimate_encoder_pool_ram_bytes(encoder_path, decoder_path, n)
+        if avail_bytes >= need:
+            return n
+    return 0
 
 
 def model_ram_check_message(required_bytes: int) -> str:

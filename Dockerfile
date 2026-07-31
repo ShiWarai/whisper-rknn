@@ -12,6 +12,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
         libgomp1 \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -35,7 +37,8 @@ COPY scripts/docker-entrypoint.sh scripts/download_models.sh ./scripts/
 RUN chmod +x ./scripts/docker-entrypoint.sh ./scripts/download_models.sh
 
 ENV WHISPER_ENCODER=/models/encoder.rknn \
-    WHISPER_DECODER=/models/decoder.rknn \
+    WHISPER_DECODER=/models/decoder.onnx \
+    WHISPER_DECODER_BACKEND=onnx \
     WHISPER_TOKENS=/models/tokens.txt \
     WHISPER_MODEL_PROFILE=turbo \
     PORT=8080 \
