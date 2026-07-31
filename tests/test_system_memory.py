@@ -97,28 +97,42 @@ def test_pick_encoder_worker_count_unknown_mem_tries_max(monkeypatch, tmp_path):
 def test_pick_encoder_worker_count_scales_with_ram(monkeypatch, tmp_path):
     enc = tmp_path / "encoder.rknn"
     enc.write_bytes(b"x" * (100 * 1024 * 1024))
-    per = estimate_encoder_pool_ram_bytes(enc, None, 1)
+    need1 = estimate_encoder_pool_ram_bytes(enc, None, 1)
+    need2 = estimate_encoder_pool_ram_bytes(enc, None, 2)
+    need3 = estimate_encoder_pool_ram_bytes(enc, None, 3)
+    # Shared weights: extras cost less than a full second/third copy.
+    assert need2 < 2 * need1
+    assert need3 < 3 * need1
 
     monkeypatch.setattr(
         "app.system_memory.read_mem_available_bytes",
-        lambda: per * 3 + 1024,
+        lambda: need3 + 1024,
     )
     assert pick_encoder_worker_count(enc, max_workers=3) == 3
 
     monkeypatch.setattr(
         "app.system_memory.read_mem_available_bytes",
-        lambda: per * 2 + 1024,
+        lambda: need2 + 1024,
     )
     assert pick_encoder_worker_count(enc, max_workers=3) == 2
 
     monkeypatch.setattr(
         "app.system_memory.read_mem_available_bytes",
-        lambda: per + 1024,
+        lambda: need1 + 1024,
     )
     assert pick_encoder_worker_count(enc, max_workers=3) == 1
 
     monkeypatch.setattr(
         "app.system_memory.read_mem_available_bytes",
-        lambda: per // 2,
+        lambda: need1 // 2,
     )
     assert pick_encoder_worker_count(enc, max_workers=3) == 0
+
+
+def test_estimate_encoder_pool_shares_weights(tmp_path):
+    enc = tmp_path / "encoder.rknn"
+    enc.write_bytes(b"x" * (500 * 1024 * 1024))
+    one = estimate_encoder_pool_ram_bytes(enc, None, 1)
+    three = estimate_encoder_pool_ram_bytes(enc, None, 3)
+    assert three > one
+    assert three < 3 * one

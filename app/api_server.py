@@ -234,8 +234,9 @@ def _load_model_sync() -> None:
         preload_vad()
         vad_ms = (time.perf_counter() - t0) * 1000.0
         print(
-            f"encoder_pool: {_model.encoder_workers} worker(s); "
-            f"silero_vad ready ({resolve_vad_model_path()}, {vad_ms:.0f} ms)"
+            f"encoder_pool: {_model.encoder_workers} worker(s) "
+            f"[shared weights]; silero_vad ready "
+            f"({resolve_vad_model_path()}, {vad_ms:.0f} ms)"
         )
     from app.auth import auth_enabled
 

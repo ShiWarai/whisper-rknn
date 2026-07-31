@@ -9,6 +9,10 @@ from typing import Optional, Tuple, Union
 PathLike = Union[str, Path]
 
 MODEL_HEADROOM = 1.15
+# Extra RSS per additional shared-weight encoder worker (internal/IO buffers).
+# Empirically ~0.1–0.25× file for Whisper turbo after first inference; keep
+# conservative so MemAvailable gating does not over-admit workers.
+ENCODER_DUP_CONTEXT_FRACTION = 0.35
 PCM_EXPANSION_FACTOR = 20
 SAMPLE_RATE_HZ = 16_000
 BYTES_PER_FLOAT32 = 4
@@ -123,10 +127,17 @@ def estimate_encoder_pool_ram_bytes(
     """
     Host RSS estimate for decoder + N encoder RKNN contexts.
 
-    Mirrors video-descriptor ``estimateModelRamBytes`` (N × vision × 1.15 + llm).
+    Weights are shared via ``rknn_dup_context``: count file×headroom once, then
+    add a per-extra-worker context/IO allowance.
     """
     n = max(1, n_workers)
-    total = estimate_encoder_worker_ram_bytes(encoder_path) * n
+    weights = estimate_encoder_worker_ram_bytes(encoder_path)
+    size = file_size_bytes(encoder_path)
+    if size is None:
+        extra_each = 256 * 1024 * 1024
+    else:
+        extra_each = max(64 * 1024 * 1024, int(size * ENCODER_DUP_CONTEXT_FRACTION))
+    total = weights + extra_each * (n - 1)
     if decoder_path is not None:
         dec = file_size_bytes(decoder_path)
         if dec is not None:

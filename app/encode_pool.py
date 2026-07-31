@@ -104,7 +104,8 @@ def core_mask_name(mask: int) -> str:
 
 
 def _release_list(sessions: List) -> None:
-    for session in sessions:
+    # Duplicated contexts share weights with sessions[0]; release dups first.
+    for session in reversed(sessions):
         try:
             session.release()
         except Exception:
@@ -119,25 +120,29 @@ def _probe_npu_capacity_worker(
     mel_time_frames: int,
 ) -> None:
     """
-    Child process: load N encoders + one forward. Exit 0 if OK.
+    Child process: load N encoders (shared weights) + one forward. Exit 0 if OK.
 
     Runs in a subprocess so an RKNN native abort cannot kill the API process.
     """
     import sys
 
+    from app.rknn_share import load_shared_encoder_sessions
+
     sessions: List = []
     ok = False
     try:
         mel = np.zeros((1, int(n_mels), int(mel_time_frames)), dtype=np.float32)
-        for i in range(n_workers):
-            mask = core_mask_for_worker(i, n_workers)
-            sessions.append(
-                _init_model(
-                    encoder_path,
-                    target_platform=target_platform,
-                    core_mask=mask,
-                )
-            )
+        masks = [core_mask_for_worker(i, n_workers) for i in range(n_workers)]
+        sessions = load_shared_encoder_sessions(
+            encoder_path,
+            masks,
+            init_model=lambda path, core_mask: _init_model(
+                path,
+                target_platform=target_platform,
+                core_mask=core_mask,
+            ),
+            verbose=False,
+        )
         out = sessions[0].inference(inputs=[np.ascontiguousarray(mel)])
         if out is None:
             raise RuntimeError("warmup returned None")
@@ -197,7 +202,7 @@ def probe_npu_worker_count(
 
 
 class EncoderPool:
-    """Thread pool of RKNN encoder sessions, one dedicated NPU core per worker."""
+    """Thread pool of RKNN encoder sessions with shared weights, one core each."""
 
     def __init__(
         self,
@@ -262,27 +267,27 @@ class EncoderPool:
         self._workers.clear()
 
     def _load_sessions(self, n_workers: int, *, target_platform: str) -> List:
-        """Load all RKNN contexts first; start threads only after full success."""
-        sessions: List = []
-        try:
-            for i in range(n_workers):
-                mask = core_mask_for_worker(i, n_workers)
-                if self._verbose:
-                    print(
-                        f"encoder_pool worker {i}: {core_mask_name(mask)} ({mask})",
-                        flush=True,
-                    )
-                sessions.append(
-                    _init_model(
-                        self._encoder_path,
-                        target_platform=target_platform,
-                        core_mask=mask,
-                    )
+        """Load one RKNN model, dup contexts for the rest; threads after success."""
+        from app.rknn_share import load_shared_encoder_sessions
+
+        masks = [core_mask_for_worker(i, n_workers) for i in range(n_workers)]
+        if self._verbose:
+            for i, mask in enumerate(masks):
+                kind = "load" if i == 0 else "dup"
+                print(
+                    f"encoder_pool worker {i}: {core_mask_name(mask)} ({mask}) [{kind}]",
+                    flush=True,
                 )
-            return sessions
-        except Exception:
-            _release_list(sessions)
-            raise
+        return load_shared_encoder_sessions(
+            self._encoder_path,
+            masks,
+            init_model=lambda path, core_mask: _init_model(
+                path,
+                target_platform=target_platform,
+                core_mask=core_mask,
+            ),
+            verbose=self._verbose,
+        )
 
     def _start_threads(self) -> None:
         self._workers.clear()

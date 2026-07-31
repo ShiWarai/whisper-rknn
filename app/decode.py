@@ -449,6 +449,8 @@ def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = No
     if core_mask is None:
         core_mask = resolve_npu_core_mask()
 
+    from app.rknn_share import drop_rknn_model_bytes
+
     rknn_lite = RKNNLite(verbose=False)
     try:
         ret = rknn_lite.load_rknn(path=filename)
@@ -460,6 +462,8 @@ def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = No
             raise RuntimeError(
                 f"Failed to init rknn runtime for {filename} (core_mask={core_mask})"
             )
+        # RKNNLite keeps a full Python copy of the .rknn after DMA upload.
+        drop_rknn_model_bytes(rknn_lite)
     except Exception:
         try:
             rknn_lite.release()
