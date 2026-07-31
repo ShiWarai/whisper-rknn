@@ -1,10 +1,10 @@
-"""Whisper multilingual language codes → token ids (no openai-whisper dependency)."""
+"""Коды языков Whisper → id токенов (без зависимости от openai-whisper)."""
 
 from __future__ import annotations
 
 from typing import Dict, Tuple
 
-# Same order as openai-whisper tokenizer (first 99 languages).
+# Тот же порядок, что у токенизатора openai-whisper (первые 99 языков).
 LANGUAGES: Dict[str, str] = {
     "en": "english",
     "zh": "chinese",
@@ -129,7 +129,7 @@ LANGUAGE_CODES: Tuple[str, ...] = tuple(LANGUAGES.keys())
 
 
 def language_token_id(lang: str) -> int:
-    """Map ISO-like language code to Whisper <|lang|> token id."""
+    """ISO-подобный код языка → id токена Whisper <|lang|>."""
     code = (lang or "ru").strip().lower()
     if code not in LANGUAGES:
         if code in TO_LANGUAGE_CODE:

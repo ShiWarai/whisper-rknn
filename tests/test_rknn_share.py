@@ -1,4 +1,4 @@
-"""Unit tests for shared-weight RKNN encoder helpers."""
+"""Тесты хелперов RKNN encoder с общими весами."""
 
 from __future__ import annotations
 

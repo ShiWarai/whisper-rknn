@@ -1,4 +1,4 @@
-"""Voice-aware audio chunking in RAM via Silero VAD (ONNX)."""
+"""Нарезка аудио по паузам речи в RAM через Silero VAD (ONNX)."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ DEFAULT_MODEL_URL = (
 
 @dataclass(frozen=True)
 class ChunkSpan:
-    """Half-open sample range ``[start, end)`` in 16 kHz mono PCM."""
+    """Полуинтервал сэмплов ``[start, end)`` в 16 кГц mono PCM."""
 
     start: int
     end: int
@@ -74,7 +74,7 @@ _vad_session: Optional[SileroVadOnnx] = None
 
 
 def preload_vad(*, model_path: Optional[Path] = None) -> SileroVadOnnx:
-    """Load Silero VAD ONNX once (API startup). Idempotent."""
+    """Загрузить Silero VAD ONNX один раз (при старте API). Идемпотентно."""
     global _vad_session
     if _vad_session is None:
         path = ensure_vad_model(model_path)
@@ -83,7 +83,7 @@ def preload_vad(*, model_path: Optional[Path] = None) -> SileroVadOnnx:
 
 
 def get_vad_session() -> SileroVadOnnx:
-    """Return preloaded VAD session, loading on first use if startup skipped preload."""
+    """Вернуть предзагруженную VAD-сессию; при пропуске preload — загрузить при первом вызове."""
     return preload_vad()
 
 
@@ -93,7 +93,7 @@ def release_vad() -> None:
 
 
 class SileroVadOnnx:
-    """Minimal Silero VAD ONNX wrapper (16 kHz, 512-sample frames)."""
+    """Минимальная обёртка Silero VAD ONNX (16 кГц, кадры по 512 сэмплов)."""
 
     def __init__(self, model_path: Path):
         if ort is None:
@@ -168,7 +168,7 @@ def find_cut_sample(
     threshold: float,
     min_gap_frames: int,
 ) -> Tuple[int, str]:
-    """Pick cut <= start+max, preferring longest non-speech gap in the search window."""
+    """Выбрать cut <= start+max, предпочитая самый длинный промежуток без речи в окне поиска."""
     total_samples = len(probs) * WINDOW_SAMPLES
     hard_end = min(start_sample + max_samples, total_samples)
     if hard_end <= start_sample:
@@ -252,7 +252,7 @@ def plan_voice_aware_chunks(
     threshold: Optional[float] = None,
     min_gap_ms: Optional[float] = None,
 ) -> Tuple[List[ChunkSpan], np.ndarray, VadCutTimings]:
-    """Run VAD + span planning on audio already in RAM."""
+    """VAD + планирование span'ов для аудио уже в RAM."""
     cfg = vad_config_from_env()
     max_sec = max_sec if max_sec is not None else cfg["max_sec"]
     search_back_sec = search_back_sec if search_back_sec is not None else cfg["search_back_sec"]
@@ -280,7 +280,7 @@ def plan_voice_aware_chunks(
 
 
 def chunk_audio_views(audio: np.ndarray, spans: List[ChunkSpan]) -> List[np.ndarray]:
-    """Return RAM views (no copy) for each span."""
+    """Вернуть view в RAM (без копии) для каждого span."""
     n = int(audio.shape[0])
     out: List[np.ndarray] = []
     for span in spans:

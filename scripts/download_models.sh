@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Download Whisper turbo RKNN + ONNX decoder weights into MODELS_DIR.
+# Скачать веса Whisper turbo RKNN + ONNX decoder в MODELS_DIR.
 #
-# Presets (WHISPER_DOWNLOAD_MODELS or first argument):
-#   turbo | 1 — ShiWarai/sherpa-rknn-whisper-turbo on Hugging Face
+# Пресеты (WHISPER_DOWNLOAD_MODELS или первый аргумент):
+#   turbo | 1 — ShiWarai/sherpa-rknn-whisper-turbo на Hugging Face
 #     (encoder.rknn, decoder.onnx, tokens.txt)
 #
-# Custom URLs (WHISPER_MODEL_URLS), comma- or newline-separated:
+# Свои URL (WHISPER_MODEL_URLS), через запятую или с новой строки:
 #   local_filename=https://host/path/file.rknn
 #
-# Only requested files are downloaded and verified.
+# Скачиваются и проверяются только запрошенные файлы.
 set -euo pipefail
 
 MODELS_DIR="${MODELS_DIR:-/models}"

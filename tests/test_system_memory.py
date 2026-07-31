@@ -1,4 +1,4 @@
-"""Unit tests for RAM forecast helpers."""
+"""Тесты прогноза RAM."""
 
 from __future__ import annotations
 
@@ -100,7 +100,7 @@ def test_pick_encoder_worker_count_scales_with_ram(monkeypatch, tmp_path):
     need1 = estimate_encoder_pool_ram_bytes(enc, None, 1)
     need2 = estimate_encoder_pool_ram_bytes(enc, None, 2)
     need3 = estimate_encoder_pool_ram_bytes(enc, None, 3)
-    # Shared weights: extras cost less than a full second/third copy.
+    # Общие веса: доп. воркеры дешевле полной второй/третьей копии.
     assert need2 < 2 * need1
     assert need3 < 3 * need1
 

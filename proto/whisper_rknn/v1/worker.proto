@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package whisper_rknn.v1;
+
+message Tensor {
+  repeated int64 shape = 1;
+  string dtype = 2;
+  bytes data = 3;
+}
+
+message Segment {
+  float start_sec = 1;
+  float end_sec = 2;
+  string text = 3;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  int32 inflight = 2;
+  float mem_available_mib = 3;
+  string npu_core = 4;
+  string model_profile = 5;
+  string service = 6;
+}
+
+message EncodeRequest {
+  string job_id = 1;
+  int32 chunk_id = 2;
+  Tensor mel = 3;
+  string model_profile = 4;
+}
+
+message EncodeResponse {
+  string job_id = 1;
+  int32 chunk_id = 2;
+  repeated Tensor cross_kv = 3;
+  float encode_ms = 4;
+}
+
+message DecodeRequest {
+  string job_id = 1;
+  int32 chunk_id = 2;
+  repeated Tensor cross_kv = 3;
+  string language = 4;
+  string task = 5;
+  bool timestamps = 6;
+  float time_offset_sec = 7;
+  string model_profile = 8;
+}
+
+message EncodeThenDecodeRequest {
+  string job_id = 1;
+  int32 chunk_id = 2;
+  Tensor mel = 3;
+  string model_profile = 4;
+  string decode_target = 5;
+  string language = 6;
+  string task = 7;
+  bool timestamps = 8;
+  float time_offset_sec = 9;
+}
+
+message DecodeResponse {
+  string job_id = 1;
+  int32 chunk_id = 2;
+  string text = 3;
+  repeated Segment segments = 4;
+  bool truncated = 5;
+  float decode_ms = 6;
+  float encode_ms = 7;
+}
+
+service EncodeService {
+  rpc Encode(EncodeRequest) returns (EncodeResponse);
+  rpc EncodeThenDecode(EncodeThenDecodeRequest) returns (DecodeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+service DecodeService {
+  rpc Decode(DecodeRequest) returns (DecodeResponse);
+  rpc Health(HealthRequest) returns (HealthResponse);
+}

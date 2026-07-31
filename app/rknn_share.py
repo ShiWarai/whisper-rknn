@@ -1,8 +1,8 @@
-"""Share RKNN weights across encoder workers via ``rknn_dup_context``.
+"""Общие веса RKNN между encoder-воркерами через ``rknn_dup_context``.
 
-``RKNNLite`` always does a full ``load_rknn`` + ``build_graph`` per session.
-The C API can duplicate a context so weights stay shared and only runtime /
-IO / internal buffers are per-worker. Pattern follows Rockchip SDK + community
+``RKNNLite`` всегда делает полный ``load_rknn`` + ``build_graph`` на сессию.
+C API умеет дублировать контекст: веса общие, runtime / IO / внутренние
+буферы — на воркера. Паттерн из Rockchip SDK и community
 (Immich, rknn_dup_context gists).
 """
 
@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
     RKNNLite = None  # type: ignore[misc, assignment]
     RKNNRuntime = None  # type: ignore[misc, assignment]
 
-# aarch64 rknn_context is pointer-sized (values exceed 32-bit).
+# На aarch64 rknn_context pointer-sized (значения больше 32 бит).
 _RKNN_CONTEXT = ctypes.c_uint64
 
 _RUNTIME_COPY_ATTRS = (
@@ -108,7 +108,7 @@ def dup_rknn_lite(base: Any, core_mask: int) -> Any:
         raise RuntimeError(f"rknn_dup_context failed (ret={ret})")
     ret = int(lib.rknn_set_core_mask(ctx_out, int(core_mask)))
     if ret != 0:
-        # Best-effort destroy of the orphaned dup context.
+        # По возможности уничтожить осиротевший dup-контекст.
         try:
             lib.rknn_destroy.argtypes = [_RKNN_CONTEXT]
             lib.rknn_destroy.restype = ctypes.c_int32
@@ -147,9 +147,9 @@ def load_shared_encoder_sessions(
     log=print,
 ) -> list:
     """
-    Load one encoder and ``rknn_dup_context`` the rest (one mask per worker).
+    Загрузить один encoder и ``rknn_dup_context`` для остальных (маска на воркер).
 
-    ``init_model(path, core_mask=...)`` must return an initialized RKNNLite.
+    ``init_model(path, core_mask=...)`` должен вернуть инициализированный RKNNLite.
     """
     if not core_masks:
         raise ValueError("core_masks must be non-empty")
@@ -164,7 +164,7 @@ def load_shared_encoder_sessions(
             sessions.append(dup_rknn_lite(base, mask))
         return sessions
     except Exception:
-        # Dups first, then base.
+        # Сначала дубли, потом базовая сессия.
         for session in reversed(sessions):
             try:
                 session.release()

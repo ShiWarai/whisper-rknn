@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/whisper-rknn}"
 MODELS_DIR="${MODELS_DIR:-/models}"
+ROLE="${WHISPER_ROLE:-all}"
 
 if [[ -n "${WHISPER_DOWNLOAD_MODELS:-}" && "${WHISPER_DOWNLOAD_MODELS}" != "0" ]]; then
   echo "WHISPER_DOWNLOAD_MODELS=${WHISPER_DOWNLOAD_MODELS}: checking turbo in ${MODELS_DIR}"
@@ -19,4 +20,19 @@ if [[ -n "${WHISPER_DOWNLOAD_MODELS:-}" && "${WHISPER_DOWNLOAD_MODELS}" != "0" ]
   export WHISPER_MODEL_PROFILE="${WHISPER_MODEL_PROFILE:-turbo}"
 fi
 
-exec python -m app.api_server "$@"
+case "${ROLE}" in
+  gateway)
+    export WHISPER_RUNTIME="${WHISPER_RUNTIME:-distributed}"
+    exec python -m app.api_server "$@"
+    ;;
+  encoder)
+    exec python -m app.encode_worker "$@"
+    ;;
+  decoder)
+    exec python -m app.decode_worker "$@"
+    ;;
+  all|local|monolith|*)
+    export WHISPER_RUNTIME="${WHISPER_RUNTIME:-local}"
+    exec python -m app.api_server "$@"
+    ;;
+esac
