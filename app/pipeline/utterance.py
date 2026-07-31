@@ -11,8 +11,8 @@ import numpy as np
 from app.core.model_config import ModelProfile
 from app.core.text import stitch_transcripts
 from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
-from app.pipeline.chunks import plan_utterance_chunks, utterance_mels
 from app.pipeline.chunk_transport import ChunkTransport
+from app.pipeline.chunks import plan_utterance_chunks, utterance_mels
 
 _SAMPLE_RATE = 16000
 
