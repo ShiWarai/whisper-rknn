@@ -83,7 +83,7 @@ def test_estimate_request_ram_bytes_includes_components():
     )
     pcm = estimate_pcm_bytes(1_000_000)
     mel = 80 * 3000 * BYTES_PER_FLOAT32
-    kv = 4 * 2 * 448 * 384 * BYTES_PER_FLOAT32
+    kv = 2 * (4 * 2 * 448 * 384 * BYTES_PER_FLOAT32)  # self_kv + cross_kv
     assert need == 1_000_000 + pcm + mel + kv + REQUEST_OVERHEAD_BYTES
 
 

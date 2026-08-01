@@ -20,7 +20,7 @@
 
 Контейнер: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel + apt ffmpeg, без PyTorch).
 
-На хосте нужны устройства NPU (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
+На хосте для `librknnrt` нужны `/dev/dri` и `/dev/dma_heap` — проброшены в `docker-compose.yml` (MPP/RGA для ASR не требуются).
 
 ## third_party и mel-фильтры
 

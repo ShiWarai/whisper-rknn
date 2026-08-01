@@ -59,16 +59,19 @@ class DecodeServicer(worker_pb2_grpc.DecodeServiceServicer):
             task: TaskType = "translate" if request.task == "translate" else "transcribe"
             language = request.language or None
             t0 = time.perf_counter()
-            result = decode_from_cross_kv(
-                self._session,
-                self._id2token,
-                cross_kv,
-                verbose=False,
-                timestamps=request.timestamps,
-                time_offset=request.time_offset_sec,
-                task=task,
-                language=language,
-            )
+            try:
+                result = decode_from_cross_kv(
+                    self._session,
+                    self._id2token,
+                    cross_kv,
+                    verbose=False,
+                    timestamps=request.timestamps,
+                    time_offset=request.time_offset_sec,
+                    task=task,
+                    language=language,
+                )
+            finally:
+                del cross_kv
             decode_ms = (time.perf_counter() - t0) * 1000.0
             segments = [
                 worker_pb2.Segment(

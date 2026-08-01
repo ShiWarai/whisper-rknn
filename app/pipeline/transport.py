@@ -82,17 +82,20 @@ class LocalChunkTransport:
             enc_t0 = time.perf_counter()
             cross_kv = self._model.run_encoder(mel)
             encode_ms = (time.perf_counter() - enc_t0) * 1000.0
-            result = decode_from_cross_kv(
-                self._model,
-                self._id2token,
-                cross_kv,
-                verbose=False,
-                timestamps=timestamps,
-                time_offset=time_offset_sec,
-                task=task,
-                language=language,
-                collect_timings=collect_timings,
-            )
+            try:
+                result = decode_from_cross_kv(
+                    self._model,
+                    self._id2token,
+                    cross_kv,
+                    verbose=False,
+                    timestamps=timestamps,
+                    time_offset=time_offset_sec,
+                    task=task,
+                    language=language,
+                    collect_timings=collect_timings,
+                )
+            finally:
+                del cross_kv
             if collect_timings and result.timings is not None:
                 result.timings.encoder_ms = encode_ms
             return result

@@ -326,8 +326,10 @@ class RKNNModel:
             self.encoder = None
         if self.decoder is not None:
             self.decoder.release()
+            self.decoder = None
         if self._onnx_decoder is not None:
             self._onnx_decoder.release()
+            self._onnx_decoder = None
 
     def run_encoder(self, x):
         arr = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
@@ -1011,6 +1013,7 @@ def decode_utterance_parallel(
     for i, span in enumerate(spans):
         if encode_futures is not None:
             enc_result = encode_futures[i].result()
+            encode_futures[i] = None  # drop Future early; frees prior cross_kv after decode
             cross_kv = enc_result.cross_kv
             if timings is not None:
                 # Реальное ожидание в очереди (submit → старт воркера), не блок future.result().
@@ -1019,6 +1022,7 @@ def decode_utterance_parallel(
                 timings.encoder_ms += enc_result.encode_ms
                 enc_started_at.append(enc_result.started_at)
                 enc_finished_at.append(enc_result.finished_at)
+            del enc_result
         else:
             enc_t0 = time.perf_counter()
             cross_kv = model.run_encoder(mels[i])
@@ -1028,17 +1032,20 @@ def decode_utterance_parallel(
                 timings.encoder_wall_ms += elapsed
 
         time_offset = span.start / float(sample_rate)
-        result = decode_from_cross_kv(
-            model,
-            id2token,
-            cross_kv,
-            verbose=verbose,
-            timestamps=timestamps,
-            time_offset=time_offset,
-            task=task,
-            language=language,
-            collect_timings=collect_timings,
-        )
+        try:
+            result = decode_from_cross_kv(
+                model,
+                id2token,
+                cross_kv,
+                verbose=verbose,
+                timestamps=timestamps,
+                time_offset=time_offset,
+                task=task,
+                language=language,
+                collect_timings=collect_timings,
+            )
+        finally:
+            del cross_kv
         any_truncated = any_truncated or result.truncated
         if timings is not None and result.timings is not None:
             timings.decoder_ms += result.timings.decoder_ms

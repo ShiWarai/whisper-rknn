@@ -89,7 +89,8 @@ def estimate_request_ram_bytes(
     """Пик RAM хоста на один запрос /v1/audio/transcriptions (намеренно с запасом)."""
     pcm_bytes = estimate_pcm_bytes(upload_bytes, max_seconds=max_seconds)
     mel_bytes = n_mels * MEL_TIME_FRAMES * BYTES_PER_FLOAT32
-    kv_bytes = n_text_layer * 2 * n_text_ctx * n_text_state * BYTES_PER_FLOAT32
+    # self_kv + cross_kv (each: n_text_layer × (K,V) × ctx × state)
+    kv_bytes = 2 * (n_text_layer * 2 * n_text_ctx * n_text_state * BYTES_PER_FLOAT32)
     return upload_bytes + pcm_bytes + mel_bytes + kv_bytes + REQUEST_OVERHEAD_BYTES
 
 

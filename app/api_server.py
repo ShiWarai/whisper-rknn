@@ -424,39 +424,49 @@ async def _handle_audio(
     cache_dir = _install_root() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
+    # Decode outside the infer lock: PyAV does not need NPU, and dropping `body`
+    # right after PCM avoids holding upload+PCM together through the whole job.
+    try:
+        samples = load_audio_16k_mono(
+            io.BytesIO(body),
+            format_hint=suffix,
+            cache_dir=cache_dir,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        del body
+
+    duration = len(samples) / 16000.0
     lock = _job_semaphore if _runtime == "distributed" else _infer_lock
 
-    async with lock:
-        try:
-            samples = load_audio_16k_mono(
-                io.BytesIO(body),
-                format_hint=suffix,
-                cache_dir=cache_dir,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        duration = len(samples) / 16000.0
-
-        if stream_flag:
-            return StreamingResponse(
-                stream_transcription_sse(
+    if stream_flag:
+        # Hold the lock for the whole SSE lifetime so local NPU stays single-flight
+        # (previously StreamingResponse returned inside `async with` and released early).
+        async def _sse_under_lock():
+            async with lock:
+                async for frame in stream_transcription_sse(
                     _backend,
                     samples,
                     task=task,
                     language=resolved_lang,
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "X-Accel-Buffering": "no",
-                    "Cache-Control": "no-cache",
-                },
-            )
+                ):
+                    yield frame
 
+        return StreamingResponse(
+            _sse_under_lock(),
+            media_type="text/event-stream",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+            },
+        )
+
+    async with lock:
         try:
             result = await _backend.decode_utterance(
                 samples,
@@ -473,6 +483,8 @@ async def _handle_audio(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        finally:
+            del samples
 
     body_out, media_type = format_transcription_response(
         result,
