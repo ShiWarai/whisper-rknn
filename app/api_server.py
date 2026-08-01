@@ -447,11 +447,13 @@ async def _handle_audio(
     if stream_flag:
         # Hold the lock for the whole SSE lifetime so local NPU stays single-flight
         # (previously StreamingResponse returned inside `async with` and released early).
+        pcm = samples
+
         async def _sse_under_lock():
             async with lock:
                 async for frame in stream_transcription_sse(
                     _backend,
-                    samples,
+                    pcm,
                     task=task,
                     language=resolved_lang,
                 ):
@@ -483,8 +485,6 @@ async def _handle_audio(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        finally:
-            del samples
 
     body_out, media_type = format_transcription_response(
         result,
