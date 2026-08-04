@@ -52,6 +52,38 @@ def test_iter_voice_aware_spans_tail():
     assert spans[-1].reason == "tail"
 
 
+def test_segment_spans_finer_than_decode_spans():
+    from app.speech_cut import segment_spans_from_probs
+
+    n_samples = int(20 * SAMPLE_RATE)
+    audio = np.zeros(n_samples, dtype=np.float32)
+    # Речь с короткими паузами каждые ~4 с (достаточно для min_gap=100 мс).
+    n_frames = n_samples // WINDOW_SAMPLES + 1
+    probs = np.full(n_frames, 0.9, dtype=np.float32)
+    for start in range(4, 20, 4):
+        f0 = int(start * SAMPLE_RATE / WINDOW_SAMPLES)
+        probs[f0 : f0 + 4] = 0.1  # ~128 мс тишины
+
+    decode = iter_voice_aware_spans(
+        audio,
+        probs,
+        max_sec=30.0,
+        search_back_sec=3.0,
+        threshold=0.5,
+        min_gap_ms=250.0,
+    )
+    fine = segment_spans_from_probs(
+        audio,
+        probs,
+        max_sec=5.0,
+        search_back_frames=16,
+        threshold=0.5,
+        min_gap_ms=100.0,
+    )
+    assert len(decode) == 1
+    assert len(fine) > len(decode)
+
+
 def test_chunk_span_duration():
     span = ChunkSpan(16000, 48000, "test")
     assert span.duration_s == 2.0

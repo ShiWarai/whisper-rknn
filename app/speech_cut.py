@@ -156,7 +156,49 @@ def vad_config_from_env() -> dict:
         "threshold": _env_float("WHISPER_VAD_THRESHOLD", 0.5),
         "min_gap_ms": _env_float("WHISPER_VAD_MIN_GAP_MS", 250.0),
         "pad_sec": _env_float("WHISPER_VAD_CHUNK_PAD_SEC", 0.0),
+        # Мелкие сегменты для verbose_json/srt/vtt (не для 30 с decode-окон).
+        # 16 кадров Silero × 32 мс ≈ 512 мс окна поиска паузы; тишина короче, чем у decode.
+        "segment_max_sec": _env_float("WHISPER_VAD_SEGMENT_MAX_SECONDS", 5.0),
+        "segment_min_gap_ms": _env_float("WHISPER_VAD_SEGMENT_MIN_GAP_MS", 100.0),
+        "segment_search_back_frames": max(
+            1, int(_env_float("WHISPER_VAD_SEGMENT_SEARCH_BACK_FRAMES", 16.0))
+        ),
     }
+
+
+def segment_spans_from_probs(
+    audio: np.ndarray,
+    probs: np.ndarray,
+    *,
+    max_sec: Optional[float] = None,
+    search_back_frames: Optional[int] = None,
+    threshold: Optional[float] = None,
+    min_gap_ms: Optional[float] = None,
+) -> List[ChunkSpan]:
+    """
+    Мелкая нарезка для таймингов ответа: тот же алгоритм, что decode-окна,
+    но с меньшим max_sec и меньшей мин. тишиной.
+
+    Decode по-прежнему режется с WHISPER_MAX_CHUNK_SECONDS / WHISPER_VAD_MIN_GAP_MS.
+    """
+    cfg = vad_config_from_env()
+    max_sec = max_sec if max_sec is not None else cfg["segment_max_sec"]
+    threshold = threshold if threshold is not None else cfg["threshold"]
+    min_gap_ms = min_gap_ms if min_gap_ms is not None else cfg["segment_min_gap_ms"]
+    frames = (
+        search_back_frames
+        if search_back_frames is not None
+        else cfg["segment_search_back_frames"]
+    )
+    search_back_sec = frames * WINDOW_SAMPLES / float(SAMPLE_RATE)
+    return iter_voice_aware_spans(
+        audio,
+        probs,
+        max_sec=max_sec,
+        search_back_sec=search_back_sec,
+        threshold=threshold,
+        min_gap_ms=min_gap_ms,
+    )
 
 
 def find_cut_sample(

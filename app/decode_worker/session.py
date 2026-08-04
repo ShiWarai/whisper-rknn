@@ -70,7 +70,6 @@ class DecodeSession:
 
     def sot_sequence_for(
         self,
-        timestamps: bool,
         *,
         task: TaskType = "transcribe",
         language: Optional[str] = None,
@@ -80,7 +79,6 @@ class DecodeSession:
             english_only=self.english_only,
             task=task,
             language=language,
-            timestamps=timestamps,
             notimestamps_id=self.notimestamps_id,
         )
 

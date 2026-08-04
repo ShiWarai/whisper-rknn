@@ -69,10 +69,9 @@ class LocalChunkTransport:
         time_offset_sec: float,
         task: TaskType,
         language: Optional[str],
-        timestamps: bool,
         collect_timings: bool = False,
     ) -> DecodeResult:
-        del chunk_id
+        del chunk_id, time_offset_sec
 
         def _run() -> DecodeResult:
             import time
@@ -88,8 +87,6 @@ class LocalChunkTransport:
                     self._id2token,
                     cross_kv,
                     verbose=False,
-                    timestamps=timestamps,
-                    time_offset=time_offset_sec,
                     task=task,
                     language=language,
                     collect_timings=collect_timings,
@@ -124,12 +121,13 @@ class GrpcChunkTransport:
         time_offset_sec: float,
         task: TaskType,
         language: Optional[str],
-        timestamps: bool,
         collect_timings: bool = False,
     ) -> DecodeResult:
         job_id = uuid.uuid4().hex
         decode_ep = await self._decode_pool.acquire()
         try:
+            # timestamps/time_offset в proto оставлены для совместимости wire;
+            # сегменты строит VAD pipeline, decode всегда без Whisper <|t|>.
             request = worker_pb2.EncodeThenDecodeRequest(
                 job_id=job_id,
                 chunk_id=chunk_id,
@@ -138,7 +136,7 @@ class GrpcChunkTransport:
                 decode_target=decode_ep.target,
                 language=language or "",
                 task=task,
-                timestamps=timestamps,
+                timestamps=False,
                 time_offset_sec=time_offset_sec,
             )
             response = await self._encode_pool.encode_then_decode(request)

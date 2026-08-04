@@ -19,6 +19,5 @@ class ChunkTransport(Protocol):
         time_offset_sec: float,
         task: TaskType,
         language: Optional[str],
-        timestamps: bool,
         collect_timings: bool = False,
     ) -> DecodeResult: ...

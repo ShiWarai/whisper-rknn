@@ -110,7 +110,7 @@ class EncodeServicer(worker_pb2_grpc.EncodeServiceServicer):
                 cross_kv=tensors,
                 language=request.language,
                 task=request.task,
-                timestamps=request.timestamps,
+                timestamps=False,
                 time_offset_sec=request.time_offset_sec,
                 model_profile=request.model_profile,
             )

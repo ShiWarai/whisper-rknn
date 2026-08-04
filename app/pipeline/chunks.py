@@ -20,6 +20,8 @@ class UtterancePlan:
     spans: List[ChunkSpan]
     vad_timings: VadCutTimings
     use_full_audio: bool
+    # Silero probs на кадр (для мелкой нарезки таймингов без повторного VAD).
+    probs: Optional[np.ndarray] = None
 
 
 def plan_utterance_chunks(
@@ -36,16 +38,23 @@ def plan_utterance_chunks(
             spans=[ChunkSpan(0, n, reason="single_window")],
             vad_timings=VadCutTimings(),
             use_full_audio=True,
+            probs=None,
         )
 
-    spans, _probs, vad_timings = plan_voice_aware_chunks(samples)
+    spans, probs, vad_timings = plan_voice_aware_chunks(samples)
     if len(spans) == 1:
         return UtterancePlan(
             spans=[ChunkSpan(0, n, reason="single_vad")],
             vad_timings=vad_timings,
             use_full_audio=True,
+            probs=probs,
         )
-    return UtterancePlan(spans=spans, vad_timings=vad_timings, use_full_audio=False)
+    return UtterancePlan(
+        spans=spans,
+        vad_timings=vad_timings,
+        use_full_audio=False,
+        probs=probs,
+    )
 
 
 def utterance_mels(

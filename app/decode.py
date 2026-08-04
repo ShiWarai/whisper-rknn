@@ -14,7 +14,7 @@ import base64
 import os
 import time
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Callable, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -27,8 +27,8 @@ from app.audio_io import (  # noqa: F401
     resample_linear,
 )
 from app.core.model_config import model_config_from_encoder_path  # noqa: F401
-from app.core.text import clean_transcript_segments, clean_transcript_text, stitch_transcripts
-from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
+from app.core.text import clean_transcript_text, stitch_transcripts
+from app.core.types import DecodeResult, DecodeTimings, TaskType
 from app.core.window import whisper_window_samples
 from app.onnx_decoder import OnnxDecoder, resolve_decoder_backend
 from app.whisper_languages import language_token_id
@@ -184,34 +184,19 @@ def build_sot_sequence(
     english_only: bool,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
-    timestamps: bool = False,
     notimestamps_id: Optional[int] = None,
 ) -> List[int]:
-    """Собрать prompt-токены декодера Whisper для одного запроса."""
+    """Собрать prompt-токены декодера Whisper (всегда с <|notimestamps|>)."""
     if english_only:
         if task == "translate":
             raise ValueError(
                 "Translation is not supported with English-only models; "
                 "use a multilingual model."
             )
-        seq = [50257, notimestamps_id]
-    elif size_key == "turbo":
-        lang_id = _language_token_id(language or _default_language())
-        task_id = _task_token_id(size_key, task)
-        seq = [50258, lang_id, task_id, notimestamps_id]
-    else:
-        lang_id = _language_token_id(language or _default_language())
-        task_id = _task_token_id(size_key, task)
-        seq = [50258, lang_id, task_id, notimestamps_id]
-
-    if (
-        timestamps
-        and notimestamps_id is not None
-        and seq
-        and seq[-1] == notimestamps_id
-    ):
-        return seq[:-1]
-    return seq
+        return [50257, notimestamps_id]
+    lang_id = _language_token_id(language or _default_language())
+    task_id = _task_token_id(size_key, task)
+    return [50258, lang_id, task_id, notimestamps_id]
 
 
 class RKNNModel:
@@ -302,18 +287,16 @@ class RKNNModel:
 
     def sot_sequence_for(
         self,
-        timestamps: bool,
         *,
         task: TaskType = "transcribe",
         language: Optional[str] = None,
     ) -> List[int]:
-        """Prompt-токены для текущего запроса."""
+        """Prompt-токены для текущего запроса (текст без Whisper <|t|>)."""
         return build_sot_sequence(
             size_key=self.size_key,
             english_only=self.english_only,
             task=task,
             language=language,
-            timestamps=timestamps,
             notimestamps_id=self.notimestamps_id,
         )
 
@@ -467,153 +450,8 @@ def _tokens_to_text(ans: List[int], id2token: dict) -> str:
     return b"".join(pieces).decode().strip()
 
 
-def parse_timestamp_tokens(
-    token_ids: List[int],
-    id2token: dict,
-    timestamp_begin: int,
-    *,
-    time_offset: float = 0.0,
-) -> Tuple[str, List[TranscriptSegment]]:
-    """
-    Split Whisper decoder ids into segment spans.
-
-    Expected pattern: ``<|t0|> text… <|t1|>`` (optionally consecutive timestamps
-    for the next start). Id ``timestamp_begin + k`` → ``k * 0.02`` seconds.
-    """
-
-    def is_ts(tid: int) -> bool:
-        return tid >= timestamp_begin
-
-    def ts_sec(tid: int) -> float:
-        return (tid - timestamp_begin) * 0.02
-
-    segments: List[TranscriptSegment] = []
-    i = 0
-    n = len(token_ids)
-    while i < n:
-        if not is_ts(token_ids[i]):
-            i += 1
-            continue
-        start = ts_sec(token_ids[i])
-        i += 1
-        content: List[int] = []
-        while i < n and not is_ts(token_ids[i]):
-            content.append(token_ids[i])
-            i += 1
-        if i >= n:
-            text = _tokens_to_text(content, id2token)
-            if text:
-                abs_start = round(start + time_offset, 3)
-                segments.append(
-                    TranscriptSegment(start=abs_start, end=abs_start, text=text)
-                )
-            break
-        end = ts_sec(token_ids[i])
-        text = _tokens_to_text(content, id2token)
-        if text:
-            segments.append(
-                TranscriptSegment(
-                    start=round(start + time_offset, 3),
-                    end=round(end + time_offset, 3),
-                    text=text,
-                )
-            )
-        # Подряд идущий timestamp после end — начало следующего сегмента, оставляем.
-        if i + 1 < n and is_ts(token_ids[i + 1]):
-            i += 1
-        else:
-            i += 1
-
-    full = _tokens_to_text([t for t in token_ids if t < timestamp_begin], id2token)
-    if not full:
-        full = " ".join(seg.text for seg in segments).strip()
-    return full, segments
-
-
-_LOGIT_MASK = -1e9
-# OpenAI default max_initial_timestamp=1.0s, precision=0.02s → index 50.
-_DEFAULT_MAX_INITIAL_TIMESTAMP_INDEX = 50
-
-
-def _logsumexp(values: np.ndarray) -> float:
-    vmax = float(np.max(values))
-    if not np.isfinite(vmax):
-        return vmax
-    shifted = values - vmax
-    return float(vmax + np.log(np.sum(np.exp(shifted))))
-
-
-def apply_timestamp_rules(
-    logits: np.ndarray,
-    sampled: Sequence[int],
-    *,
-    eot: int,
-    timestamp_begin: int,
-    notimestamps_id: Optional[int],
-    max_initial_timestamp_index: Optional[int] = _DEFAULT_MAX_INITIAL_TIMESTAMP_INDEX,
-) -> np.ndarray:
-    """
-    Numpy-порт OpenAI ``ApplyTimestampRules`` для одного greedy-шага.
-
-    ``sampled`` — токены, уже сгенерированные после SOT (аналог ``tokens[sample_begin:]``).
-  """
-    out = np.asarray(logits, dtype=np.float32).copy()
-    seq = list(sampled)
-
-    if notimestamps_id is not None:
-        out[notimestamps_id] = _LOGIT_MASK
-
-    last_was_timestamp = len(seq) >= 1 and seq[-1] >= timestamp_begin
-    penultimate_was_timestamp = len(seq) < 2 or seq[-2] >= timestamp_begin
-
-    if last_was_timestamp:
-        if penultimate_was_timestamp:
-            out[timestamp_begin:] = _LOGIT_MASK
-        else:
-            out[:eot] = _LOGIT_MASK
-
-    timestamps = [t for t in seq if t >= timestamp_begin]
-    if timestamps:
-        if last_was_timestamp and not penultimate_was_timestamp:
-            timestamp_last = timestamps[-1]
-        else:
-            timestamp_last = timestamps[-1] + 1
-        out[timestamp_begin:timestamp_last] = _LOGIT_MASK
-
-    if len(seq) == 0:
-        out[:timestamp_begin] = _LOGIT_MASK
-        if max_initial_timestamp_index is not None:
-            last_allowed = timestamp_begin + max_initial_timestamp_index
-            out[last_allowed + 1 :] = _LOGIT_MASK
-
-    # log_softmax по уже замаскированным logits
-    shifted = out - np.max(out)
-    logprobs = shifted - _logsumexp(shifted)
-    timestamp_logprob = _logsumexp(logprobs[timestamp_begin:])
-    max_text_token_logprob = float(np.max(logprobs[:timestamp_begin]))
-    if timestamp_logprob > max_text_token_logprob:
-        out[:timestamp_begin] = _LOGIT_MASK
-
-    return out
-
-
-def _select_next_token(
-    logits: np.ndarray,
-    *,
-    timestamps: bool,
-    sampled: Sequence[int],
-    model: RKNNModel,
-) -> int:
-    arr = np.asarray(logits, dtype=np.float32).copy()
-    if timestamps and model.timestamp_begin is not None:
-        arr = apply_timestamp_rules(
-            arr,
-            sampled,
-            eot=model.eot,
-            timestamp_begin=model.timestamp_begin,
-            notimestamps_id=model.notimestamps_id,
-        )
-    return int(arr.argmax())
+def _select_next_token(logits: np.ndarray) -> int:
+    return int(np.asarray(logits, dtype=np.float32).argmax())
 
 
 def decode_from_cross_kv(
@@ -622,20 +460,21 @@ def decode_from_cross_kv(
     cross_kv,
     *,
     verbose: bool = True,
-    timestamps: bool = False,
-    time_offset: float = 0.0,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
     collect_timings: bool = False,
     wall_t0: Optional[float] = None,
 ) -> DecodeResult:
-    """Авторегрессионный decode по готовому cross-attention KV энкодера."""
+    """Авторегрессионный decode по готовому cross-attention KV энкодера.
+
+    Всегда с ``<|notimestamps|>``. Сегменты для API — через VAD в pipeline.
+    """
     timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
     if wall_t0 is None:
         wall_t0 = time.perf_counter()
 
     self_kv = model.get_self_cache()
-    sot = model.sot_sequence_for(timestamps, task=task, language=language)
+    sot = model.sot_sequence_for(task=task, language=language)
     offset = np.array([0], dtype=np.int32)
     out = None
     decoder_calls = 0
@@ -654,12 +493,7 @@ def decode_from_cross_kv(
         offset += 1
 
     assert out is not None
-    idx = _select_next_token(
-        out[0][0, 0],
-        timestamps=timestamps,
-        sampled=[],
-        model=model,
-    )
+    idx = _select_next_token(out[0][0, 0])
     ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
     stop_at = resolve_decode_token_limit(model.n_text_ctx)
@@ -703,12 +537,7 @@ def decode_from_cross_kv(
         for i in range(1, len(out)):
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
-        idx = _select_next_token(
-            out[0][0, 0],
-            timestamps=timestamps,
-            sampled=ans,
-            model=model,
-        )
+        idx = _select_next_token(out[0][0, 0])
 
     truncated = idx != model.eot and not stopped_on_repeat and offset.item() >= stop_at
     if timings is not None:
@@ -722,25 +551,15 @@ def decode_from_cross_kv(
             f"n_text_ctx={model.n_text_ctx} (no EOT)"
         )
 
-    segments: Optional[List[TranscriptSegment]] = None
-    if timestamps and model.timestamp_begin is not None:
-        text, segments = parse_timestamp_tokens(
-            ans, id2token, model.timestamp_begin, time_offset=time_offset
-        )
-    else:
-        text_ids = ans
-        if model.timestamp_begin is not None:
-            text_ids = [t for t in ans if t < model.timestamp_begin]
-        text = _tokens_to_text(text_ids, id2token)
+    text_ids = ans
+    if model.timestamp_begin is not None:
+        text_ids = [t for t in ans if t < model.timestamp_begin]
+    text = clean_transcript_text(_tokens_to_text(text_ids, id2token))
 
     if verbose:
         print(text)
 
-    if segments is not None:
-        segments = clean_transcript_segments(segments)
-    text = clean_transcript_text(text)
-
-    return DecodeResult(text=text, segments=segments, timings=timings, truncated=truncated)
+    return DecodeResult(text=text, segments=None, timings=timings, truncated=truncated)
 
 
 def decode_samples(
@@ -749,8 +568,6 @@ def decode_samples(
     samples: np.ndarray,
     verbose: bool = True,
     *,
-    timestamps: bool = False,
-    time_offset: float = 0.0,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
     collect_timings: bool = False,
@@ -781,8 +598,6 @@ def decode_samples(
         id2token,
         cross_kv,
         verbose=verbose,
-        timestamps=timestamps,
-        time_offset=time_offset,
         task=task,
         language=language,
         collect_timings=collect_timings,
@@ -796,7 +611,7 @@ def decode_samples(
         timings.wall_ms = (time.perf_counter() - wall_t0) * 1000.0
     return DecodeResult(
         text=decoded.text,
-        segments=decoded.segments,
+        segments=None,
         timings=timings,
         truncated=decoded.truncated,
     )
@@ -873,24 +688,13 @@ def _next_chunk_start(
     chunk_samples: int,
     sample_rate: int,
     truncated: bool,
-    segments: Optional[List[TranscriptSegment]],
-    timestamps: bool,
 ) -> int:
     """
     Advance sliding window. If decode stopped without EOT, pull next start back
     so the unfinished tail is re-decoded (Whisper-style seek without full VAD).
-    With timestamps, seek from the last segment end when available.
     """
     if end >= n:
         return n
-
-    if timestamps and segments:
-        last_end = max((s.end for s in segments), default=None)
-        if last_end is not None and last_end > 0:
-            seek = int(round(last_end * sample_rate))
-            lookback = max(overlap_samples, int(0.5 * sample_rate))
-            nxt = max(start + max(hop // 4, 1), seek - lookback)
-            return _maybe_merge_short_tail(nxt, n, chunk_samples, sample_rate)
 
     if truncated:
         retry = _truncate_retry_samples(sample_rate)
@@ -938,7 +742,6 @@ def decode_utterance_parallel(
     samples: np.ndarray,
     verbose: bool = True,
     *,
-    timestamps: bool = False,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
     on_chunk: Optional[Callable[[DecodeResult], None]] = None,
@@ -975,7 +778,6 @@ def decode_utterance_parallel(
             id2token,
             samples,
             verbose=verbose,
-            timestamps=timestamps,
             task=task,
             language=language,
             collect_timings=collect_timings,
@@ -1009,7 +811,6 @@ def decode_utterance_parallel(
         encode_futures = None
 
     parts: List[str] = []
-    all_segments: List[TranscriptSegment] = []
     any_truncated = False
     enc_started_at: List[float] = []
     enc_finished_at: List[float] = []
@@ -1035,15 +836,12 @@ def decode_utterance_parallel(
                 timings.encoder_ms += elapsed
                 timings.encoder_wall_ms += elapsed
 
-        time_offset = span.start / float(sample_rate)
         try:
             result = decode_from_cross_kv(
                 model,
                 id2token,
                 cross_kv,
                 verbose=verbose,
-                timestamps=timestamps,
-                time_offset=time_offset,
                 task=task,
                 language=language,
                 collect_timings=collect_timings,
@@ -1060,11 +858,7 @@ def decode_utterance_parallel(
         if on_chunk is not None and result.text:
             on_chunk(result)
 
-        if timestamps and result.segments is not None:
-            all_segments.extend(result.segments)
-            if result.text:
-                parts.append(result.text)
-        elif result.text:
+        if result.text:
             parts.append(result.text)
 
     if timings is not None:
@@ -1076,12 +870,7 @@ def decode_utterance_parallel(
                 max(enc_finished_at) - min(enc_started_at)
             ) * 1000.0
 
-    if timestamps:
-        text = stitch_transcripts(parts)
-        segments: Optional[List[TranscriptSegment]] = all_segments
-    else:
-        text = stitch_transcripts(parts)
-        segments = None
+    text = stitch_transcripts(parts)
 
     if verbose:
         print(text)
@@ -1094,7 +883,7 @@ def decode_utterance_parallel(
 
     return DecodeResult(
         text=text,
-        segments=segments,
+        segments=None,
         timings=timings,
         truncated=any_truncated,
     )
@@ -1106,7 +895,6 @@ def decode_utterance(
     audio: Union[str, np.ndarray],
     verbose: bool = True,
     *,
-    timestamps: bool = False,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
     on_chunk: Optional[Callable[[DecodeResult], None]] = None,
@@ -1120,7 +908,7 @@ def decode_utterance(
     without EOT, the next window starts earlier so the unfinished tail is re-heard.
 
     ``audio`` may be 16 kHz mono float32 samples or a path/bytes source for decoding.
-    When ``timestamps`` is True, returns segment spans for LLM/video alignment.
+    Segments for timed APIs are produced by the VAD pipeline, not here.
     """
     wall_t0 = time.perf_counter()
     timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
@@ -1143,7 +931,6 @@ def decode_utterance(
             id2token,
             samples,
             verbose=verbose,
-            timestamps=timestamps,
             task=task,
             language=language,
             on_chunk=on_chunk,
@@ -1160,12 +947,10 @@ def decode_utterance(
         dur_s = n / float(sample_rate)
         print(
             f"audio_duration_s={dur_s:.2f} window_s={chunk_samples / sample_rate:.2f} "
-            f"overlap_s={overlap_samples / sample_rate:.2f} "
-            f"timestamps={timestamps} task={task}"
+            f"overlap_s={overlap_samples / sample_rate:.2f} task={task}"
         )
 
     parts: List[str] = []
-    all_segments: List[TranscriptSegment] = []
     start = 0
     chunk_i = 0
     any_truncated = False
@@ -1186,14 +971,11 @@ def decode_utterance(
                 f"chunk {chunk_i + 1} samples={len(chunk)} "
                 f"start={start} ({start / sample_rate:.2f}s)"
             )
-        time_offset = start / float(sample_rate)
         result = decode_samples(
             model,
             id2token,
             chunk,
             verbose=verbose,
-            timestamps=timestamps,
-            time_offset=time_offset,
             task=task,
             language=language,
             collect_timings=collect_timings,
@@ -1223,19 +1005,9 @@ def decode_utterance(
             chunk_samples=chunk_samples,
             sample_rate=sample_rate,
             truncated=chunk_truncated,
-            segments=result.segments,
-            timestamps=timestamps,
         )
 
-        if timestamps and result.segments is not None:
-            segs = result.segments
-            if next_start < n:
-                boundary = next_start / float(sample_rate)
-                segs = [s for s in segs if s.start < boundary]
-            all_segments.extend(segs)
-            if result.text:
-                parts.append(result.text)
-        elif result.text:
+        if result.text:
             parts.append(result.text)
 
         if chunk_truncated and next_start < n and verbose:
@@ -1255,12 +1027,7 @@ def decode_utterance(
         timings.chunks = chunk_i
         timings.truncated = timings.truncated or any_truncated
 
-    if timestamps:
-        text = stitch_transcripts(parts)
-        segments: Optional[List[TranscriptSegment]] = all_segments
-    else:
-        text = stitch_transcripts(parts)
-        segments = None
+    text = stitch_transcripts(parts)
 
     if verbose and chunk_i > 1:
         print(text)
@@ -1273,7 +1040,7 @@ def decode_utterance(
 
     return DecodeResult(
         text=text,
-        segments=segments,
+        segments=None,
         timings=timings,
         truncated=any_truncated,
     )
@@ -1285,7 +1052,6 @@ def decode_utterance_stream(
     audio: Union[str, np.ndarray],
     verbose: bool = True,
     *,
-    timestamps: bool = False,
     task: TaskType = "transcribe",
     language: Optional[str] = None,
 ) -> Iterator[DecodeResult]:
@@ -1296,15 +1062,13 @@ def decode_utterance_stream(
         samples = load_audio_16k_mono(audio)
 
     spans, hop, sample_rate = _utterance_chunk_spans(model, samples)
-    for i, (start_sample, chunk) in enumerate(spans):
-        time_offset = start_sample / float(sample_rate)
+    del hop, sample_rate
+    for _i, (_start_sample, chunk) in enumerate(spans):
         result = decode_samples(
             model,
             id2token,
             chunk,
             verbose=verbose,
-            timestamps=timestamps,
-            time_offset=time_offset,
             task=task,
             language=language,
         )
