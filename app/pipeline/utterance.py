@@ -135,7 +135,7 @@ async def run_utterance_pipeline(
             parts.append(result.text)
 
     if timestamps:
-        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(parts)
+        text = stitch_transcripts(parts)
         segments: Optional[List[TranscriptSegment]] = all_segments or None
     else:
         text = stitch_transcripts(parts)

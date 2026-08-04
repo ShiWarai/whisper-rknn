@@ -524,10 +524,9 @@ def parse_timestamp_tokens(
         else:
             i += 1
 
-    full = " ".join(seg.text for seg in segments).strip()
+    full = _tokens_to_text([t for t in token_ids if t < timestamp_begin], id2token)
     if not full:
-        text_ids = [t for t in token_ids if t < timestamp_begin]
-        full = _tokens_to_text(text_ids, id2token)
+        full = " ".join(seg.text for seg in segments).strip()
     return full, segments
 
 
@@ -739,7 +738,6 @@ def decode_from_cross_kv(
 
     if segments is not None:
         segments = clean_transcript_segments(segments)
-        text = " ".join(seg.text for seg in segments).strip() if segments else ""
     text = clean_transcript_text(text)
 
     return DecodeResult(text=text, segments=segments, timings=timings, truncated=truncated)
@@ -1079,7 +1077,7 @@ def decode_utterance_parallel(
             ) * 1000.0
 
     if timestamps:
-        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(parts)
+        text = stitch_transcripts(parts)
         segments: Optional[List[TranscriptSegment]] = all_segments
     else:
         text = stitch_transcripts(parts)
@@ -1258,9 +1256,7 @@ def decode_utterance(
         timings.truncated = timings.truncated or any_truncated
 
     if timestamps:
-        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(
-            parts
-        )
+        text = stitch_transcripts(parts)
         segments: Optional[List[TranscriptSegment]] = all_segments
     else:
         text = stitch_transcripts(parts)
