@@ -2,7 +2,43 @@
 
 from __future__ import annotations
 
-from typing import List
+import re
+from typing import TYPE_CHECKING, List, Optional, Sequence
+
+if TYPE_CHECKING:
+    from app.core.types import TranscriptSegment
+
+# Типичный watermark из субтитров (часто единственный «текст» в коротких роликах).
+_WATERMARK_RE = re.compile(r"(?iu)субтитры\s+создавал\s+Dima\s*Torzok")
+
+
+def clean_transcript_text(text: str) -> str:
+    """Убрать известные watermark-фразы из распознанного текста."""
+    if not text:
+        return ""
+    out = _WATERMARK_RE.sub("", text)
+    out = re.sub(r"\s+", " ", out).strip()
+    out = re.sub(r"\s*([.,!?;:])\s*", r"\1 ", out)
+    out = re.sub(r"([.,!?;:])\s*\1+", r"\1", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out.strip(".,!?;: «»\"'()[]")
+
+
+def clean_transcript_segments(
+    segments: Optional[Sequence["TranscriptSegment"]],
+) -> Optional[List["TranscriptSegment"]]:
+    if not segments:
+        return None
+    from app.core.types import TranscriptSegment
+
+    cleaned: List[TranscriptSegment] = []
+    for seg in segments:
+        text = clean_transcript_text(seg.text)
+        if text:
+            cleaned.append(
+                TranscriptSegment(start=seg.start, end=seg.end, text=text)
+            )
+    return cleaned or None
 
 
 def stitch_transcripts(parts: List[str]) -> str:

@@ -27,7 +27,7 @@ from app.audio_io import (  # noqa: F401
     resample_linear,
 )
 from app.core.model_config import model_config_from_encoder_path  # noqa: F401
-from app.core.text import stitch_transcripts
+from app.core.text import clean_transcript_segments, clean_transcript_text, stitch_transcripts
 from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
 from app.core.window import whisper_window_samples
 from app.onnx_decoder import OnnxDecoder, resolve_decoder_backend
@@ -736,6 +736,12 @@ def decode_from_cross_kv(
 
     if verbose:
         print(text)
+
+    if segments is not None:
+        segments = clean_transcript_segments(segments)
+        text = " ".join(seg.text for seg in segments).strip() if segments else ""
+    text = clean_transcript_text(text)
+
     return DecodeResult(text=text, segments=segments, timings=timings, truncated=truncated)
 
 
