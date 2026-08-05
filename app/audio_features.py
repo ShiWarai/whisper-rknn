@@ -1,4 +1,4 @@
-"""Whisper mel features without PyTorch / openai-whisper."""
+"""Whisper mel без PyTorch / openai-whisper."""
 
 from __future__ import annotations
 
@@ -23,14 +23,14 @@ def _mel_filters(n_mels: int) -> np.ndarray:
     path = Path(__file__).resolve().parent / "assets" / "mel_filters.npz"
     with np.load(path, allow_pickle=False) as f:
         filters = f[f"mel_{n_mels}"].astype(np.float32)
-    # Whisper STFT drops the Nyquist bin; keep (n_mels, n_fft // 2).
+    # STFT Whisper отбрасывает бин Найквиста; оставляем (n_mels, n_fft // 2).
     return filters[:, : N_FFT // 2]
 
 
 def pad_or_trim(
     array: np.ndarray, length: int = N_SAMPLES, *, axis: int = -1
 ) -> np.ndarray:
-    """Pad or trim audio to ``length`` samples (default 30 s @ 16 kHz)."""
+    """Дополнить или обрезать аудио до ``length`` сэмплов (по умолчанию 30 с @ 16 кГц)."""
     array = np.asarray(array, dtype=np.float32)
     if array.shape[axis] > length:
         sl = [slice(None)] * array.ndim
@@ -44,7 +44,7 @@ def pad_or_trim(
 
 
 def _stft_power_loop(audio: np.ndarray) -> np.ndarray:
-    """Reference STFT (loop); kept for regression tests."""
+    """Эталонный STFT (цикл); оставлен для регрессионных тестов."""
     window = np.hanning(N_FFT).astype(np.float32)
     pad = N_FFT // 2
     audio = np.pad(audio.astype(np.float32, copy=False), (pad, pad), mode="reflect")
@@ -60,7 +60,7 @@ def _stft_power_loop(audio: np.ndarray) -> np.ndarray:
 
 
 def _stft_power(audio: np.ndarray) -> np.ndarray:
-    """Power spectrum matching ``torch.stft`` + ``[..., :-1]`` (shape: n_fft//2 × T)."""
+    """Спектр мощности как у ``torch.stft`` + ``[..., :-1]`` (форма: n_fft//2 × T)."""
     window = np.hanning(N_FFT).astype(np.float32)
     pad = N_FFT // 2
     audio = np.pad(audio.astype(np.float32, copy=False), (pad, pad), mode="reflect")
@@ -93,7 +93,7 @@ def log_mel_spectrogram(audio: np.ndarray, n_mels: int = 80) -> np.ndarray:
 
 
 def _normalize_whisper_mel(mel: np.ndarray) -> np.ndarray:
-    """sherpa-onnx / knf path: same log compression as Whisper."""
+    """Путь sherpa-onnx / knf: та же log-компрессия, что у Whisper."""
     mel = np.maximum(mel.astype(np.float32, copy=False), 1e-10)
     mel = np.log10(mel)
     mel = np.maximum(mel, mel.max() - 8.0)
@@ -101,7 +101,7 @@ def _normalize_whisper_mel(mel: np.ndarray) -> np.ndarray:
 
 
 def _pad_mel_frames(mel: np.ndarray, target_frames: int) -> np.ndarray:
-    """Pad/truncate time axis to ``target_frames`` (mel shape T × n_mels)."""
+    """Дополнить/обрезать ось времени до ``target_frames`` (mel: T × n_mels)."""
     mel = np.pad(mel, ((0, 1500), (0, 0)), mode="constant")
     if mel.shape[0] > target_frames:
         mel = mel[: target_frames - 50]
@@ -139,7 +139,7 @@ def compute_features(
     if n_mels == 128:
         audio = pad_or_trim(samples)
         mel = log_mel_spectrogram(audio, n_mels=128)
-        # Encoder expects exactly target_frames (3000 for 30 s @ 100 fps).
+        # Энкодер ожидает ровно target_frames (3000 для 30 с @ 100 fps).
         if mel.shape[1] > target_frames:
             mel = mel[:, :target_frames]
         elif mel.shape[1] < target_frames:

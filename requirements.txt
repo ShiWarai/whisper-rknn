@@ -1,4 +1,4 @@
-# Runtime (linux/arm64 Docker image)
+# Runtime (Docker-образ linux/arm64)
 numpy>=1.26,<2
 soundfile>=0.12
 kaldi_native_fbank>=1.22
@@ -9,5 +9,9 @@ fastapi>=0.115.0
 uvicorn>=0.32.0
 python-multipart>=0.0.12
 onnxruntime>=1.19.0
+
+# gRPC (распределённые микросервисы)
+grpcio>=1.62.0
+protobuf>=4.25.0,<6
 
 # rknn_toolkit_lite2 ставится в Dockerfile из third_party/*.whl (не в PyPI).

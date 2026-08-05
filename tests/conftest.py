@@ -1,4 +1,4 @@
-"""Shared pytest fixtures: mock rknnlite before app imports."""
+"""Общие pytest-фикстуры: mock rknnlite до импорта app."""
 
 from __future__ import annotations
 
@@ -25,6 +25,6 @@ if "rknnlite" not in sys.modules:
 
 @pytest.fixture(autouse=True)
 def _turbo_profile_env(monkeypatch):
-    """Default test/runtime profile matches production: large-v3-turbo."""
+    """Профиль тестов/runtime по умолчанию как в проде: large-v3-turbo."""
     monkeypatch.setenv("WHISPER_MODEL_PROFILE", "turbo")
     monkeypatch.setenv("WHISPER_LANGUAGE", "ru")

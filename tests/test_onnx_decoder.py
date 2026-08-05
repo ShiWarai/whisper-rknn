@@ -1,4 +1,4 @@
-"""Tests for ONNX decoder backend resolution."""
+"""Тесты выбора backend ONNX decoder."""
 
 from __future__ import annotations
 

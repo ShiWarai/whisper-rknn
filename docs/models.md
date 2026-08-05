@@ -20,7 +20,7 @@
 
 Контейнер: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel + apt ffmpeg, без PyTorch).
 
-На хосте нужны устройства NPU (как в [video-descriptor-rkllm](https://github.com/ShiWarai/video-descriptor-rkllm)): `/dev/mpp_service`, `/dev/rga`, `/dev/dri`, `/dev/dma_heap` — проброшены в `docker-compose.yml`.
+На хосте для `librknnrt` нужны `/dev/dri` и `/dev/dma_heap` — проброшены в `docker-compose.yml` (MPP/RGA для ASR не требуются).
 
 ## third_party и mel-фильтры
 
@@ -154,10 +154,12 @@ WHISPER_MODEL_PROFILE=turbo
 | `WHISPER_MODEL_URLS` | — | Свои URL: `file.rknn=https://...` |
 | `WHISPER_MODEL_PROFILE` | `turbo` | Профиль декодера (для generic-имён `encoder.rknn`) |
 | `WHISPER_LANGUAGE` | `ru` | Код Whisper (`ru`, `en`, `uk`, …). **Обязательно** под ваше аудио |
-| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Ядра NPU (single-encoder режим) |
+| `WHISPER_NPU_CORE_MASK` | `0_1_2` | Подмножество NPU cores для encoder pool / single-encoder (`0`, `0_1`, `0_1_2`, …) |
 | `WHISPER_PARALLEL_ENCODE` | `1` | VAD + parallel encoder pool |
 | `WHISPER_ENCODER_WORKERS` | `0` | `0` = auto (MemAvailable + NPU probe); `1..N` = force ceiling |
-| `WHISPER_ENCODER_MAX_WORKERS` | число `NPU_CORE_N` | Потолок воркеров (RK3588: 3; больше — на SoC с большим числом ядер) |
+| `WHISPER_ENCODER_MAX_WORKERS` | число разрешённых NPU cores | Потолок воркеров encoder pool |
+| `WHISPER_CPU_AFFINITY` | — | CPU воркера: `4,5,6` или `4-7` (encoder/decoder/monolith; не gateway) |
+| `WHISPER_ONNX_INTRA_OP_THREADS` | `0` | Потоки ONNX decoder: `0`/`auto` = видимые CPU; число = потолок |
 | `WHISPER_MAX_CHUNK_SECONDS` | `30` | Макс. длина VAD-чанка |
 | `WHISPER_VAD_THRESHOLD` | `0.5` | Порог Silero VAD |
 | `WHISPER_VAD_SEARCH_BACK_SEC` | `3` | Окно поиска паузы перед лимитом |

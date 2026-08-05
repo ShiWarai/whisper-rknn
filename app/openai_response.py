@@ -1,14 +1,15 @@
-"""OpenAI-compatible transcription response formatters (hwdsl2/docker-whisper)."""
+"""Форматирование ответов транскрипции, совместимых с OpenAI (hwdsl2/docker-whisper)."""
 
 from __future__ import annotations
 
 import json
-from typing import Iterable, List, Literal, Optional
+from typing import AsyncIterator, Iterable, List, Literal, Optional
 
-from app.decode import DecodeResult, TranscriptSegment, stitch_transcripts
+from app.core.text import stitch_transcripts
+from app.core.types import DecodeResult, TaskType, TranscriptSegment
+from app.runtime.backend import AsrBackend
 
 ResponseFormat = Literal["json", "text", "verbose_json", "srt", "vtt"]
-TaskType = Literal["transcribe", "translate"]
 
 
 def _fmt_ts(seconds: float, fmt: str) -> str:
@@ -87,7 +88,7 @@ def format_transcription_response(
     language: Optional[str],
     duration: float,
 ) -> tuple[bytes | str, str]:
-    """Return (body, media_type)."""
+    """Вернуть (body, media_type)."""
     if response_format == "text":
         return result.text, "text/plain"
 
@@ -129,7 +130,7 @@ def sse_error_frame(message: str) -> str:
 
 
 def stream_sse_frames(chunk_texts: Iterable[str], full_text: str) -> List[str]:
-    """Build OpenAI-style SSE frames from per-chunk text parts."""
+    """Собрать SSE-кадры в стиле OpenAI из текста по чанкам."""
     frames: List[str] = []
     first = True
     for part in chunk_texts:
@@ -142,6 +143,33 @@ def stream_sse_frames(chunk_texts: Iterable[str], full_text: str) -> List[str]:
     frames.append(sse_done_frame(full_text))
     frames.append("data: [DONE]\n\n")
     return frames
+
+
+async def stream_transcription_sse(
+    backend: AsrBackend,
+    samples,
+    *,
+    task: TaskType,
+    language: Optional[str],
+) -> AsyncIterator[str]:
+    """Единый SSE-поток для local и distributed (reorder в pipeline)."""
+    chunk_texts: List[str] = []
+    first = True
+    async for chunk_result in backend.decode_utterance_stream(
+        samples,
+        task=task,
+        language=language,
+    ):
+        text = chunk_result.text.strip()
+        if not text:
+            continue
+        chunk_texts.append(chunk_result.text)
+        delta = text if first else " " + text
+        first = False
+        yield sse_delta_frame(delta)
+    full_text = stitch_transcripts(chunk_texts)
+    yield sse_done_frame(full_text)
+    yield "data: [DONE]\n\n"
 
 
 def merge_chunk_results(chunk_results: List[DecodeResult]) -> DecodeResult:

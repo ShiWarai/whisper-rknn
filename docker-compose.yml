@@ -14,12 +14,13 @@ services:
     container_name: whisper-rknn-api
     privileged: true
     devices:
-      - /dev/mpp_service:/dev/mpp_service
-      - /dev/rga:/dev/rga
       - /dev/dri:/dev/dri
       - /dev/dma_heap:/dev/dma_heap
     restart: unless-stopped
+    entrypoint: ["./scripts/docker-entrypoint.sh"]
     environment:
+      WHISPER_ROLE: ${WHISPER_ROLE:-all}
+      WHISPER_RUNTIME: ${WHISPER_RUNTIME:-local}
       WHISPER_DOWNLOAD_MODELS: ${WHISPER_DOWNLOAD_MODELS:-0}
       WHISPER_MODEL_URLS: ${WHISPER_MODEL_URLS:-}
       WHISPER_MODELS_DIR: /models
@@ -29,6 +30,8 @@ services:
       WHISPER_PARALLEL_ENCODE: ${WHISPER_PARALLEL_ENCODE:-1}
       WHISPER_ENCODER_WORKERS: ${WHISPER_ENCODER_WORKERS:-0}
       WHISPER_ENCODER_MAX_WORKERS: ${WHISPER_ENCODER_MAX_WORKERS:-}
+      WHISPER_CPU_AFFINITY: ${WHISPER_CPU_AFFINITY:-}
+      WHISPER_ONNX_INTRA_OP_THREADS: ${WHISPER_ONNX_INTRA_OP_THREADS:-0}
       WHISPER_MAX_CHUNK_SECONDS: ${WHISPER_MAX_CHUNK_SECONDS:-30}
       WHISPER_VAD_THRESHOLD: ${WHISPER_VAD_THRESHOLD:-0.5}
       WHISPER_VAD_SEARCH_BACK_SEC: ${WHISPER_VAD_SEARCH_BACK_SEC:-3}

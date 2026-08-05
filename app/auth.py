@@ -1,4 +1,4 @@
-"""OpenAI-style API key auth (Bearer token)."""
+"""Аутентификация по API-ключу в стиле OpenAI (Bearer token)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def configured_api_keys() -> FrozenSet[str]:
 
 
 def reload_api_keys() -> FrozenSet[str]:
-    """Re-read keys from env (tests / config reload)."""
+    """Перечитать ключи из env (тесты / перезагрузка конфига)."""
     global _API_KEYS
     _API_KEYS = parse_api_keys_from_env()
     return _API_KEYS

@@ -11,116 +11,39 @@ Fallback: soundfile (WAV/FLAC), CLI ffmpeg (f32le pipe).
 from __future__ import annotations
 
 import base64
-import io
 import os
-import shutil
-import subprocess
-import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterator, List, Literal, Optional, Tuple, Union
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import soundfile as sf
 
+from app import audio_io as _audio_io
 from app.audio_features import compute_features
+from app.audio_io import (  # noqa: F401
+    AudioSource,
+    load_audio_16k_mono,
+    prepare_audio_16k_mono,
+    resample_linear,
+)
+from app.core.model_config import model_config_from_encoder_path  # noqa: F401
+from app.core.text import clean_transcript_segments, clean_transcript_text, stitch_transcripts
+from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
+from app.core.window import whisper_window_samples
 from app.onnx_decoder import OnnxDecoder, resolve_decoder_backend
 from app.whisper_languages import language_token_id
 
-TaskType = Literal["transcribe", "translate"]
+_HAS_AV = _audio_io._HAS_AV
 
 
-@dataclass
-class TranscriptSegment:
-    """Timed transcript span (seconds from start of utterance)."""
-
-    start: float
-    end: float
-    text: str
-
-
-@dataclass
-class DecodeTimings:
-    """Per-utterance stage timings (milliseconds unless noted)."""
-
-    audio_ms: float = 0.0
-    mel_ms: float = 0.0
-    encoder_ms: float = 0.0
-    decoder_ms: float = 0.0
-    tokens: int = 0
-    decoder_calls: int = 0
-    chunks: int = 1
-    wall_ms: float = 0.0
-    rtf: float = 0.0
-    decoder_backend: str = "rknn"
-    truncated: bool = False
-    vad_ms: float = 0.0
-    cut_ms: float = 0.0
-    encode_queue_wait_ms: float = 0.0
-    encoder_wall_ms: float = 0.0
-    parallel_workers: int = 0
-
-    def to_dict(self) -> dict:
-        return {
-            "audio_ms": round(self.audio_ms, 2),
-            "mel_ms": round(self.mel_ms, 2),
-            "encoder_ms": round(self.encoder_ms, 2),
-            "encoder_wall_ms": round(self.encoder_wall_ms, 2),
-            "decoder_ms": round(self.decoder_ms, 2),
-            "tokens": self.tokens,
-            "decoder_calls": self.decoder_calls,
-            "chunks": self.chunks,
-            "wall_ms": round(self.wall_ms, 2),
-            "rtf": round(self.rtf, 4),
-            "decoder_backend": self.decoder_backend,
-            "truncated": self.truncated,
-            "vad_ms": round(self.vad_ms, 2),
-            "cut_ms": round(self.cut_ms, 2),
-            "encode_queue_wait_ms": round(self.encode_queue_wait_ms, 2),
-            "parallel_workers": self.parallel_workers,
-        }
-
-    def merge(self, other: "DecodeTimings") -> None:
-        self.audio_ms += other.audio_ms
-        self.mel_ms += other.mel_ms
-        self.encoder_ms += other.encoder_ms
-        self.encoder_wall_ms += other.encoder_wall_ms
-        self.decoder_ms += other.decoder_ms
-        self.tokens += other.tokens
-        self.decoder_calls += other.decoder_calls
-        self.chunks += other.chunks
-        self.wall_ms += other.wall_ms
-        self.truncated = self.truncated or other.truncated
-        self.vad_ms += other.vad_ms
-        self.cut_ms += other.cut_ms
-        self.encode_queue_wait_ms += other.encode_queue_wait_ms
-        if other.parallel_workers:
-            self.parallel_workers = other.parallel_workers
-        if other.decoder_backend and other.decoder_backend != self.decoder_backend:
-            self.decoder_backend = other.decoder_backend
-
-
-@dataclass
-class DecodeResult:
-    text: str
-    segments: Optional[List[TranscriptSegment]] = None
-    timings: Optional[DecodeTimings] = None
-    truncated: bool = False
-
-try:
-    import av
-
-    _HAS_AV = True
-except ImportError:
-    av = None  # type: ignore[assignment]
-    _HAS_AV = False
-
-try:
-    from rknnlite.api import RKNNLite
-except ImportError:
-    print("Install rknn_toolkit_lite2 (см. Docker-сборку и каталог third_party/*.whl).")
-    raise
+def _get_rknnlite():
+    try:
+        from rknnlite.api import RKNNLite
+    except ImportError as exc:
+        raise ImportError(
+            "Install rknn_toolkit_lite2 (см. Docker-сборку и каталог third_party/*.whl)."
+        ) from exc
+    return RKNNLite
 
 
 def _install_root() -> Path:
@@ -164,243 +87,13 @@ def causal_mask_1d(n: int, L: int):
     return mask
 
 
-def resample_linear(samples: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
-    if src_sr == dst_sr:
-        return samples
-    duration = len(samples) / float(src_sr)
-    n_out = max(1, int(round(duration * dst_sr)))
-    x_new = np.linspace(0.0, len(samples) - 1, num=n_out, dtype=np.float64)
-    return np.interp(
-        x_new,
-        np.arange(len(samples), dtype=np.float64),
-        samples.astype(np.float64),
-    ).astype(np.float32)
+# Re-export для тестов и CLI (реализация в app.audio_io).
 
 
 def load_audio_wav(path: str) -> Tuple[np.ndarray, int]:
-    data, sample_rate = sf.read(path, always_2d=True, dtype="float32")
-    mono = np.ascontiguousarray(data[:, 0])
-    return mono, int(sample_rate)
+    from app.audio_io import load_audio_wav as _load
 
-
-AudioSource = Union[str, Path, bytes, bytearray, BinaryIO]
-
-_AV_FORMAT_BY_SUFFIX = {
-    ".ogg": "ogg",
-    ".opus": "ogg",
-    ".mp3": "mp3",
-    ".m4a": "mov",
-    ".aac": "aac",
-    ".webm": "webm",
-    ".mp4": "mov",
-    ".mkv": "matroska",
-    ".wav": "wav",
-    ".flac": "flac",
-}
-
-
-def _av_format_from_hint(format_hint: Optional[str]) -> Optional[str]:
-    if not format_hint:
-        return None
-    hint = format_hint.strip().lower()
-    if hint == "bin":
-        return None
-    if not hint.startswith("."):
-        hint = f".{hint}"
-    return _AV_FORMAT_BY_SUFFIX.get(hint)
-
-
-def _resolve_input_path(source: AudioSource) -> str:
-    path = Path(source).expanduser().resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"Audio not found: {source}")
-    return str(path)
-
-
-def _resampled_chunks_to_mono_f32(resampler, frame) -> List[np.ndarray]:
-    chunks: List[np.ndarray] = []
-    for resampled in resampler.resample(frame):
-        arr = resampled.to_ndarray()
-        if arr.ndim == 2:
-            arr = arr.mean(axis=0) if arr.shape[0] > 1 else arr[0]
-        chunks.append(np.asarray(arr, dtype=np.float32).reshape(-1))
-    return chunks
-
-
-def _decode_container_to_16k_mono(container) -> np.ndarray:
-    if not container.streams.audio:
-        raise RuntimeError("No audio stream in container")
-
-    resampler = av.AudioResampler(format="flt", layout="mono", rate=16000)
-    chunks: List[np.ndarray] = []
-    for frame in container.decode(audio=0):
-        chunks.extend(_resampled_chunks_to_mono_f32(resampler, frame))
-    chunks.extend(_resampled_chunks_to_mono_f32(resampler, None))
-
-    if not chunks:
-        return np.zeros(0, dtype=np.float32)
-    return np.ascontiguousarray(np.concatenate(chunks), dtype=np.float32)
-
-
-def _load_via_pyav(source: AudioSource, format_hint: Optional[str]) -> np.ndarray:
-    if not _HAS_AV:
-        raise RuntimeError("PyAV is not installed")
-
-    av_format = _av_format_from_hint(format_hint)
-    open_kwargs = {"format": av_format} if av_format else {}
-
-    if isinstance(source, (bytes, bytearray)):
-        with av.open(io.BytesIO(source), **open_kwargs) as container:
-            return _decode_container_to_16k_mono(container)
-
-    if isinstance(source, (str, Path)):
-        path = Path(source).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"Audio not found: {source}")
-        hint = format_hint or path.suffix
-        av_format = _av_format_from_hint(hint)
-        open_kwargs = {"format": av_format} if av_format else {}
-        with av.open(str(path), **open_kwargs) as container:
-            return _decode_container_to_16k_mono(container)
-
-    if hasattr(source, "read"):
-        with av.open(source, **open_kwargs) as container:
-            return _decode_container_to_16k_mono(container)
-
-    raise TypeError(f"Unsupported audio source type: {type(source)!r}")
-
-
-def _materialize_source_to_path(
-    source: AudioSource,
-    cache_dir: Optional[Path],
-    format_hint: Optional[str],
-) -> Tuple[str, Optional[Path]]:
-    if isinstance(source, (str, Path)):
-        path = Path(source).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"Audio not found: {source}")
-        return str(path), None
-
-    cache = cache_dir or (_install_root() / ".cache")
-    cache.mkdir(parents=True, exist_ok=True)
-    suffix = ".bin"
-    if format_hint:
-        suffix = format_hint if format_hint.startswith(".") else f".{format_hint}"
-
-    fd, tmp = tempfile.mkstemp(suffix=suffix, prefix="whisper_in_", dir=cache)
-    os.close(fd)
-    tmp_path = Path(tmp)
-
-    if isinstance(source, (bytes, bytearray)):
-        tmp_path.write_bytes(source)
-    elif hasattr(source, "read"):
-        data = source.read()
-        if isinstance(data, str):
-            data = data.encode()
-        tmp_path.write_bytes(data)
-        if hasattr(source, "seek"):
-            source.seek(0)
-    else:
-        tmp_path.unlink(missing_ok=True)
-        raise TypeError(f"Unsupported audio source type: {type(source)!r}")
-
-    return str(tmp_path), tmp_path
-
-
-def _load_via_soundfile_16k(path: str) -> np.ndarray:
-    mono, sr = load_audio_wav(path)
-    if sr != 16000:
-        mono = resample_linear(mono, sr, 16000)
-    return mono
-
-
-def _load_via_ffmpeg_pipe(path: str) -> np.ndarray:
-    ffmpeg = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found")
-
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        path,
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "f32le",
-        "pipe:1",
-    ]
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        stderr = r.stderr.decode(errors="replace")
-        raise RuntimeError(f"ffmpeg failed:\n{stderr}")
-    if not r.stdout:
-        return np.zeros(0, dtype=np.float32)
-    return np.frombuffer(r.stdout, dtype=np.float32).copy()
-
-
-def load_audio_16k_mono(
-    source: AudioSource,
-    *,
-    format_hint: Optional[str] = None,
-    cache_dir: Optional[Path] = None,
-) -> np.ndarray:
-    """
-    Decode audio to 16 kHz mono float32 in RAM.
-
-    Primary path: PyAV (libav API, in-process).
-    Fallbacks: soundfile (WAV/FLAC), CLI ffmpeg f32le pipe (last resort).
-    """
-    errors: List[str] = []
-
-    if _HAS_AV:
-        try:
-            return _load_via_pyav(source, format_hint)
-        except Exception as exc:
-            errors.append(f"PyAV: {exc}")
-
-    temp_path: Optional[Path] = None
-    try:
-        if isinstance(source, (str, Path)):
-            path = _resolve_input_path(source)
-        else:
-            path, temp_path = _materialize_source_to_path(
-                source, cache_dir, format_hint
-            )
-            if _HAS_AV:
-                try:
-                    return _load_via_pyav(path, format_hint)
-                except Exception as exc:
-                    errors.append(f"PyAV(file): {exc}")
-
-        suffix = Path(path).suffix.lower()
-        if suffix in (".wav", ".flac"):
-            try:
-                return _load_via_soundfile_16k(path)
-            except Exception as exc:
-                errors.append(f"soundfile: {exc}")
-
-        try:
-            return _load_via_ffmpeg_pipe(path)
-        except Exception as exc:
-            errors.append(f"ffmpeg: {exc}")
-    finally:
-        if temp_path is not None:
-            temp_path.unlink(missing_ok=True)
-
-    detail = "; ".join(errors) if errors else "no decoder available"
-    raise RuntimeError(f"Cannot decode audio ({detail})")
-
-
-def prepare_audio_16k_mono(
-    input_path: str, cache_dir: Optional[Path] = None
-) -> np.ndarray:
-    """Backward-compatible alias for :func:`load_audio_16k_mono` (no temp WAV)."""
-    return load_audio_16k_mono(input_path, cache_dir=cache_dir)
+    return _load(path)
 
 
 def load_tokens(filename):
@@ -414,8 +107,8 @@ def load_tokens(filename):
 
 def resolve_npu_core_mask(name: Optional[str] = None) -> int:
     """
-    Map WHISPER_NPU_CORE_MASK to RKNNLite constants.
-    Default: NPU_CORE_0_1_2 (all three cores on RK3588).
+    Сопоставить WHISPER_NPU_CORE_MASK с константами RKNNLite.
+    По умолчанию: NPU_CORE_0_1_2 (все три ядра на RK3588).
     """
     raw = (name if name is not None else os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2")).strip()
     aliases = {
@@ -439,6 +132,7 @@ def resolve_npu_core_mask(name: Optional[str] = None) -> int:
         raise ValueError(
             f"Unknown WHISPER_NPU_CORE_MASK={raw!r}; use 0, 0_1, 0_1_2, all, auto"
         )
+    RKNNLite = _get_rknnlite()
     return int(getattr(RKNNLite, key))
 
 
@@ -449,6 +143,9 @@ def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = No
     if core_mask is None:
         core_mask = resolve_npu_core_mask()
 
+    from app.rknn_share import drop_rknn_model_bytes
+
+    RKNNLite = _get_rknnlite()
     rknn_lite = RKNNLite(verbose=False)
     try:
         ret = rknn_lite.load_rknn(path=filename)
@@ -460,6 +157,8 @@ def init_model(filename, target_platform="rk3588", core_mask: Optional[int] = No
             raise RuntimeError(
                 f"Failed to init rknn runtime for {filename} (core_mask={core_mask})"
             )
+        # RKNNLite держит полную Python-копию .rknn после DMA upload.
+        drop_rknn_model_bytes(rknn_lite)
     except Exception:
         try:
             rknn_lite.release()
@@ -488,7 +187,7 @@ def build_sot_sequence(
     timestamps: bool = False,
     notimestamps_id: Optional[int] = None,
 ) -> List[int]:
-    """Build Whisper decoder prompt tokens for a single request."""
+    """Собрать prompt-токены декодера Whisper для одного запроса."""
     if english_only:
         if task == "translate":
             raise ValueError(
@@ -608,7 +307,7 @@ class RKNNModel:
         task: TaskType = "transcribe",
         language: Optional[str] = None,
     ) -> List[int]:
-        """Prompt tokens for the current request."""
+        """Prompt-токены для текущего запроса."""
         return build_sot_sequence(
             size_key=self.size_key,
             english_only=self.english_only,
@@ -627,8 +326,10 @@ class RKNNModel:
             self.encoder = None
         if self.decoder is not None:
             self.decoder.release()
+            self.decoder = None
         if self._onnx_decoder is not None:
             self._onnx_decoder.release()
+            self._onnx_decoder = None
 
     def run_encoder(self, x):
         arr = np.ascontiguousarray(np.asarray(x), dtype=np.float32)
@@ -658,12 +359,6 @@ class RKNNModel:
         return self.decoder.inference(
             inputs=[tokens] + self_kv + cross_kv + [offset, mask]
         )
-
-
-def whisper_window_samples(sample_rate: int = 16000, mel_time_frames: int = 3000) -> int:
-    """Samples per model window (~30 s for mel_time_frames=3000 @ 100 frames/s)."""
-    seconds = float(mel_time_frames) / 100.0
-    return max(1, int(round(seconds * sample_rate)))
 
 
 def parallel_encode_enabled() -> bool:
@@ -708,7 +403,7 @@ def _merge_short_tail_spans(
     *,
     min_tail_samples: int,
 ) -> List[Tuple[int, np.ndarray]]:
-    """Replace a tiny trailing window with one final full-size slice."""
+    """Заменить крошечный хвостовой кусок одним финальным полноразмерным окном."""
     if min_tail_samples <= 0 or len(spans) <= 1:
         return spans
     last_start, last_chunk = spans[-1]
@@ -747,7 +442,7 @@ def iter_audio_chunk_spans(
         if end >= n:
             break
         start += hop
-        # Snap final window to the end so a tiny tail is not a near-duplicate hop.
+        # Прижать финальное окно к концу, чтобы крошечный хвост не дублировал hop.
         if start < n and start + chunk_samples >= n and n - start < hop:
             final_start = max(0, n - chunk_samples)
             if final_start > start:
@@ -760,43 +455,8 @@ def iter_audio_chunks(
     chunk_samples: int,
     overlap_samples: int = 0,
 ) -> List[np.ndarray]:
-    """Sliding windows of length ``chunk_samples`` (see :func:`iter_audio_chunk_spans`)."""
+    """Скользящие окна длины ``chunk_samples`` (см. :func:`iter_audio_chunk_spans`)."""
     return [chunk for _, chunk in iter_audio_chunk_spans(samples, chunk_samples, overlap_samples)]
-
-
-def stitch_transcripts(parts: List[str]) -> str:
-    """Join chunk texts; drop duplicated overlap (longest word suffix/prefix match)."""
-    cleaned = [p.strip() for p in parts if p and p.strip()]
-    if not cleaned:
-        return ""
-    out = cleaned[0]
-    for nxt in cleaned[1:]:
-        out = _merge_overlap_text(out, nxt)
-    return out.strip()
-
-
-def _merge_overlap_text(left: str, right: str) -> str:
-    """Append ``right`` to ``left``, removing the longest shared word boundary."""
-    lw = left.split()
-    rw = right.split()
-    if not lw:
-        return right
-    if not rw:
-        return left
-
-    max_k = min(len(lw), len(rw), 48)
-
-    def _norm(w: str) -> str:
-        return w.lower().strip(".,!?;:«»\"'()[]")
-
-    best = 0
-    for k in range(max_k, 0, -1):
-        if [_norm(x) for x in lw[-k:]] == [_norm(x) for x in rw[:k]]:
-            best = k
-            break
-    if best:
-        return " ".join(lw + rw[best:])
-    return left + " " + right
 
 
 def _tokens_to_text(ans: List[int], id2token: dict) -> str:
@@ -858,17 +518,102 @@ def parse_timestamp_tokens(
                     text=text,
                 )
             )
-        # Consecutive timestamp after end is the next segment start — keep it.
+        # Подряд идущий timestamp после end — начало следующего сегмента, оставляем.
         if i + 1 < n and is_ts(token_ids[i + 1]):
             i += 1
         else:
             i += 1
 
-    full = " ".join(seg.text for seg in segments).strip()
+    full = _tokens_to_text([t for t in token_ids if t < timestamp_begin], id2token)
     if not full:
-        text_ids = [t for t in token_ids if t < timestamp_begin]
-        full = _tokens_to_text(text_ids, id2token)
+        full = " ".join(seg.text for seg in segments).strip()
     return full, segments
+
+
+_LOGIT_MASK = -1e9
+# OpenAI default max_initial_timestamp=1.0s, precision=0.02s → index 50.
+_DEFAULT_MAX_INITIAL_TIMESTAMP_INDEX = 50
+
+
+def _logsumexp(values: np.ndarray) -> float:
+    vmax = float(np.max(values))
+    if not np.isfinite(vmax):
+        return vmax
+    shifted = values - vmax
+    return float(vmax + np.log(np.sum(np.exp(shifted))))
+
+
+def apply_timestamp_rules(
+    logits: np.ndarray,
+    sampled: Sequence[int],
+    *,
+    eot: int,
+    timestamp_begin: int,
+    notimestamps_id: Optional[int],
+    max_initial_timestamp_index: Optional[int] = _DEFAULT_MAX_INITIAL_TIMESTAMP_INDEX,
+) -> np.ndarray:
+    """
+    Numpy-порт OpenAI ``ApplyTimestampRules`` для одного greedy-шага.
+
+    ``sampled`` — токены, уже сгенерированные после SOT (аналог ``tokens[sample_begin:]``).
+  """
+    out = np.asarray(logits, dtype=np.float32).copy()
+    seq = list(sampled)
+
+    if notimestamps_id is not None:
+        out[notimestamps_id] = _LOGIT_MASK
+
+    last_was_timestamp = len(seq) >= 1 and seq[-1] >= timestamp_begin
+    penultimate_was_timestamp = len(seq) < 2 or seq[-2] >= timestamp_begin
+
+    if last_was_timestamp:
+        if penultimate_was_timestamp:
+            out[timestamp_begin:] = _LOGIT_MASK
+        else:
+            out[:eot] = _LOGIT_MASK
+
+    timestamps = [t for t in seq if t >= timestamp_begin]
+    if timestamps:
+        if last_was_timestamp and not penultimate_was_timestamp:
+            timestamp_last = timestamps[-1]
+        else:
+            timestamp_last = timestamps[-1] + 1
+        out[timestamp_begin:timestamp_last] = _LOGIT_MASK
+
+    if len(seq) == 0:
+        out[:timestamp_begin] = _LOGIT_MASK
+        if max_initial_timestamp_index is not None:
+            last_allowed = timestamp_begin + max_initial_timestamp_index
+            out[last_allowed + 1 :] = _LOGIT_MASK
+
+    # log_softmax по уже замаскированным logits
+    shifted = out - np.max(out)
+    logprobs = shifted - _logsumexp(shifted)
+    timestamp_logprob = _logsumexp(logprobs[timestamp_begin:])
+    max_text_token_logprob = float(np.max(logprobs[:timestamp_begin]))
+    if timestamp_logprob > max_text_token_logprob:
+        out[:timestamp_begin] = _LOGIT_MASK
+
+    return out
+
+
+def _select_next_token(
+    logits: np.ndarray,
+    *,
+    timestamps: bool,
+    sampled: Sequence[int],
+    model: RKNNModel,
+) -> int:
+    arr = np.asarray(logits, dtype=np.float32).copy()
+    if timestamps and model.timestamp_begin is not None:
+        arr = apply_timestamp_rules(
+            arr,
+            sampled,
+            eot=model.eot,
+            timestamp_begin=model.timestamp_begin,
+            notimestamps_id=model.notimestamps_id,
+        )
+    return int(arr.argmax())
 
 
 def decode_from_cross_kv(
@@ -884,7 +629,7 @@ def decode_from_cross_kv(
     collect_timings: bool = False,
     wall_t0: Optional[float] = None,
 ) -> DecodeResult:
-    """Autoregressive decode given precomputed encoder cross-attention KV."""
+    """Авторегрессионный decode по готовому cross-attention KV энкодера."""
     timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
     if wall_t0 is None:
         wall_t0 = time.perf_counter()
@@ -909,10 +654,12 @@ def decode_from_cross_kv(
         offset += 1
 
     assert out is not None
-    logits = np.asarray(out[0][0, 0], dtype=np.float32).copy()
-    if timestamps and model.timestamp_begin is not None:
-        logits[: model.timestamp_begin] = -1e9
-    idx = int(logits.argmax())
+    idx = _select_next_token(
+        out[0][0, 0],
+        timestamps=timestamps,
+        sampled=[],
+        model=model,
+    )
     ans: List[int] = []
     max_ngram_repeats = int(os.environ.get("WHISPER_MAX_NGRAM_REPEAT", "6"))
     stop_at = resolve_decode_token_limit(model.n_text_ctx)
@@ -956,7 +703,12 @@ def decode_from_cross_kv(
         for i in range(1, len(out)):
             self_kv[i - 1][:, offset.item() : offset.item() + 1, :] = out[i]
         offset += 1
-        idx = int(out[0][0, 0].argmax())
+        idx = _select_next_token(
+            out[0][0, 0],
+            timestamps=timestamps,
+            sampled=ans,
+            model=model,
+        )
 
     truncated = idx != model.eot and not stopped_on_repeat and offset.item() >= stop_at
     if timings is not None:
@@ -983,6 +735,11 @@ def decode_from_cross_kv(
 
     if verbose:
         print(text)
+
+    if segments is not None:
+        segments = clean_transcript_segments(segments)
+    text = clean_transcript_text(text)
+
     return DecodeResult(text=text, segments=segments, timings=timings, truncated=truncated)
 
 
@@ -998,7 +755,7 @@ def decode_samples(
     language: Optional[str] = None,
     collect_timings: bool = False,
 ) -> DecodeResult:
-    """Decode one window of 16 kHz mono float samples (≤ model window; shorter is padded)."""
+    """Декодировать одно окно 16 кГц mono float (≤ окно модели; короче — с паддингом)."""
     timings = DecodeTimings(decoder_backend=model.decoder_backend) if collect_timings else None
     wall_t0 = time.perf_counter()
 
@@ -1065,7 +822,7 @@ def resolve_decode_token_limit(n_text_ctx: int) -> int:
 
 
 def _truncate_retry_samples(sample_rate: int = 16000) -> int:
-    """Extra overlap when a window stops without EOT (re-hear the tail)."""
+    """Доп. overlap, если окно остановилось без EOT (переслушать хвост)."""
     raw = os.environ.get("WHISPER_TRUNCATE_RETRY_SECONDS", "10").strip()
     try:
         sec = float(raw)
@@ -1077,7 +834,7 @@ def _truncate_retry_samples(sample_rate: int = 16000) -> int:
 
 
 def _utterance_window_params(model: RKNNModel) -> Tuple[int, int, int]:
-    """Return ``(sample_rate, chunk_samples, overlap_samples)``."""
+    """Вернуть ``(sample_rate, chunk_samples, overlap_samples)``."""
     sample_rate = 16000
     chunk_samples = whisper_window_samples(sample_rate, model.mel_time_frames)
     env_sec = os.environ.get("WHISPER_CHUNK_SECONDS", "").strip()
@@ -1149,7 +906,7 @@ def _next_chunk_start(
 def _maybe_merge_short_tail(
     nxt: int, n: int, chunk_samples: int, sample_rate: int
 ) -> int:
-    """If the remaining tail after ``nxt`` is tiny, snap to a final full window."""
+    """Если хвост после ``nxt`` крошечный — прижать к финальному полному окну."""
     if nxt >= n:
         return n
     remaining = n - nxt
@@ -1160,7 +917,7 @@ def _maybe_merge_short_tail(
 
 
 def _utterance_chunk_spans(model: RKNNModel, samples: np.ndarray) -> Tuple[List[Tuple[int, np.ndarray]], int, int]:
-    """Return chunk spans plus hop/overlap sample counts for timestamp trimming."""
+    """Вернуть span'ы чанков и hop/overlap в сэмплах для обрезки таймкодов."""
     sample_rate, chunk_samples, overlap_samples = _utterance_window_params(model)
     spans = iter_audio_chunk_spans(
         samples, chunk_samples, overlap_samples=overlap_samples
@@ -1189,7 +946,7 @@ def decode_utterance_parallel(
     wall_t0: Optional[float] = None,
 ) -> DecodeResult:
     """
-    VAD-fixed spans in RAM + parallel NPU encode (encoder pool) + sequential CPU decode.
+    Span'ы по VAD в RAM + параллельный NPU encode (encoder pool) + последовательный CPU decode.
     """
     from app.speech_cut import chunk_audio_views, plan_voice_aware_chunks
 
@@ -1260,14 +1017,16 @@ def decode_utterance_parallel(
     for i, span in enumerate(spans):
         if encode_futures is not None:
             enc_result = encode_futures[i].result()
+            encode_futures[i] = None  # drop Future early; frees prior cross_kv after decode
             cross_kv = enc_result.cross_kv
             if timings is not None:
-                # Real queue wait (submit → worker start), not future.result() block.
+                # Реальное ожидание в очереди (submit → старт воркера), не блок future.result().
                 timings.encode_queue_wait_ms += enc_result.queue_wait_ms
-                # Sum of pure NPU inference time across chunks.
+                # Сумма чистого времени NPU inference по чанкам.
                 timings.encoder_ms += enc_result.encode_ms
                 enc_started_at.append(enc_result.started_at)
                 enc_finished_at.append(enc_result.finished_at)
+            del enc_result
         else:
             enc_t0 = time.perf_counter()
             cross_kv = model.run_encoder(mels[i])
@@ -1277,17 +1036,20 @@ def decode_utterance_parallel(
                 timings.encoder_wall_ms += elapsed
 
         time_offset = span.start / float(sample_rate)
-        result = decode_from_cross_kv(
-            model,
-            id2token,
-            cross_kv,
-            verbose=verbose,
-            timestamps=timestamps,
-            time_offset=time_offset,
-            task=task,
-            language=language,
-            collect_timings=collect_timings,
-        )
+        try:
+            result = decode_from_cross_kv(
+                model,
+                id2token,
+                cross_kv,
+                verbose=verbose,
+                timestamps=timestamps,
+                time_offset=time_offset,
+                task=task,
+                language=language,
+                collect_timings=collect_timings,
+            )
+        finally:
+            del cross_kv
         any_truncated = any_truncated or result.truncated
         if timings is not None and result.timings is not None:
             timings.decoder_ms += result.timings.decoder_ms
@@ -1309,13 +1071,13 @@ def decode_utterance_parallel(
         timings.chunks = len(spans)
         timings.truncated = timings.truncated or any_truncated
         if enc_started_at and enc_finished_at:
-            # Wall clock of the parallel encode wave (first start → last finish).
+            # Время на стене параллельной волны encode (первый старт → последний финиш).
             timings.encoder_wall_ms = (
                 max(enc_finished_at) - min(enc_started_at)
             ) * 1000.0
 
     if timestamps:
-        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(parts)
+        text = stitch_transcripts(parts)
         segments: Optional[List[TranscriptSegment]] = all_segments
     else:
         text = stitch_transcripts(parts)
@@ -1494,9 +1256,7 @@ def decode_utterance(
         timings.truncated = timings.truncated or any_truncated
 
     if timestamps:
-        text = " ".join(s.text for s in all_segments).strip() or stitch_transcripts(
-            parts
-        )
+        text = stitch_transcripts(parts)
         segments: Optional[List[TranscriptSegment]] = all_segments
     else:
         text = stitch_transcripts(parts)
@@ -1529,7 +1289,7 @@ def decode_utterance_stream(
     task: TaskType = "transcribe",
     language: Optional[str] = None,
 ) -> Iterator[DecodeResult]:
-    """Yield per-chunk decode results as each RKNN window completes."""
+    """Отдавать decode-результаты по чанкам по мере готовности каждого окна RKNN."""
     if isinstance(audio, np.ndarray):
         samples = np.ascontiguousarray(audio, dtype=np.float32)
     else:
@@ -1552,84 +1312,9 @@ def decode_utterance_stream(
             yield result
 
 
-def _infer_model_size_key(encoder_path: str, profile: Optional[str]) -> str:
-    """
-    Размер модели: WHISPER_MODEL_PROFILE / WHISPER_VARIANT, иначе подстрока в пути
-    (tiny, base, small, medium, turbo).
-    """
-    p = (profile or "").strip().lower()
-    if p:
-        if p in ("tiny", "base", "small", "medium", "turbo"):
-            return p
-        raise ValueError(
-            f"WHISPER_MODEL_PROFILE must be one of tiny,base,small,medium,turbo; got {profile!r}"
-        )
-    enc = encoder_path.lower()
-    for k in ("tiny", "base", "small", "medium", "turbo"):
-        if k in enc:
-            return k
-    raise ValueError(
-        "Cannot infer model size from encoder path (expected tiny/base/small/medium/turbo in the "
-        f"path, or set WHISPER_MODEL_PROFILE): {encoder_path!r}"
-    )
-
-
 def _language_token_id(lang: str) -> int:
-    """Whisper multilingual language token (e.g. ru -> 50263)."""
+    """Мультиязычный language token Whisper (напр. ru -> 50263)."""
     return language_token_id(lang)
-
-
-def model_config_from_encoder_path(
-    encoder_path: str,
-    profile: Optional[str] = None,
-):
-    """Return decoder hyperparams + mel shape for a given encoder .rknn path."""
-    prof_env = os.environ.get("WHISPER_MODEL_PROFILE") or os.environ.get("WHISPER_VARIANT")
-    size_key = _infer_model_size_key(encoder_path, profile if profile is not None else prof_env)
-
-    enc = encoder_path
-    english_only = ".en" in enc
-    if english_only:
-        notimestamps_id = 50362
-        timestamp_begin = 50363
-        eot = 50256
-        n_mels, mel_time_frames = 80, 3000
-    elif size_key == "turbo":
-        notimestamps_id = 50364
-        timestamp_begin = 50365
-        eot = 50257
-        n_mels, mel_time_frames = 128, 3000
-    else:
-        notimestamps_id = 50363
-        timestamp_begin = 50364
-        eot = 50257
-        n_mels, mel_time_frames = 80, 3000
-
-    if size_key == "tiny":
-        n_text_layer, n_text_ctx, n_text_state = 4, 448, 384
-    elif size_key == "base":
-        n_text_layer, n_text_ctx, n_text_state = 6, 448, 512
-    elif size_key == "small":
-        n_text_layer, n_text_ctx, n_text_state = 12, 448, 768
-    elif size_key == "medium":
-        n_text_layer, n_text_ctx, n_text_state = 24, 448, 1024
-    elif size_key == "turbo":
-        n_text_layer, n_text_ctx, n_text_state = 4, 448, 1280
-    else:
-        raise ValueError(f"Unsupported model size: {size_key!r}")
-
-    return (
-        size_key,
-        english_only,
-        eot,
-        n_text_layer,
-        n_text_ctx,
-        n_text_state,
-        n_mels,
-        mel_time_frames,
-        notimestamps_id,
-        timestamp_begin,
-    )
 
 
 def apply_librknnrt_from_optional_path(cli_path: Optional[str]) -> None:
