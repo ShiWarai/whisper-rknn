@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-from app.core.text import (
-    clean_transcript_segments,
-    clean_transcript_text,
-    redistribute_text_to_spans,
-    stitch_transcripts,
-)
+from app.core.text import clean_transcript_segments, clean_transcript_text, stitch_transcripts
 from app.core.types import TranscriptSegment
 
 
@@ -28,25 +23,6 @@ def test_clean_transcript_segments_drops_empty_segments():
         ]
     )
     assert segments == [TranscriptSegment(start=1.0, end=2.0, text="живой текст")]
-
-
-def test_redistribute_text_to_spans_by_duration():
-    spans = [
-        TranscriptSegment(start=0.0, end=1.0, text=""),
-        TranscriptSegment(start=1.0, end=3.0, text=""),
-    ]
-    out = redistribute_text_to_spans("один два три четыре пять шесть", spans)
-    assert len(out) == 2
-    assert " ".join(s.text for s in out).split() == [
-        "один",
-        "два",
-        "три",
-        "четыре",
-        "пять",
-        "шесть",
-    ]
-    # Второй сегмент вдвое длиннее — больше слов.
-    assert len(out[1].text.split()) >= len(out[0].text.split())
 
 
 def test_stitch_transcripts_dedupes_overlap():

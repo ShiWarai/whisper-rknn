@@ -9,75 +9,12 @@ from typing import AsyncIterator, Callable, List, Optional
 import numpy as np
 
 from app.core.model_config import ModelProfile
-from app.core.text import redistribute_text_to_spans, stitch_transcripts
+from app.core.text import stitch_transcripts
 from app.core.types import DecodeResult, DecodeTimings, TaskType, TranscriptSegment
 from app.pipeline.chunk_transport import ChunkTransport
-from app.pipeline.chunks import UtterancePlan, plan_utterance_chunks, utterance_mels
-from app.speech_cut import get_vad_session, segment_spans_from_probs
+from app.pipeline.chunks import plan_utterance_chunks, utterance_mels
 
 _SAMPLE_RATE = 16000
-
-
-def _timing_segments_for_plan(
-    samples: np.ndarray,
-    plan: UtterancePlan,
-    chunk_texts: List[str],
-) -> List[TranscriptSegment]:
-    """
-    Мелкие сегменты: меньшая тишина / меньший max, decode-окна (~30 с) — как раньше.
-
-    Текст качественный из decode-чанков раскладывается по мелким span'ам.
-    """
-    probs = plan.probs
-    if probs is None:
-        probs = get_vad_session().speech_probs(samples)
-
-    fine_spans = segment_spans_from_probs(samples, probs)
-    if not fine_spans:
-        fine_spans = list(plan.spans)
-
-    # Раскладка текста каждого decode-чанка по пересекающимся fine-span'ам.
-    segments: List[TranscriptSegment] = []
-    for decode_span, chunk_text in zip(plan.spans, chunk_texts, strict=True):
-        text = (chunk_text or "").strip()
-        if not text:
-            continue
-        children = [
-            TranscriptSegment(
-                start=round(s.start / float(_SAMPLE_RATE), 3),
-                end=round(s.end / float(_SAMPLE_RATE), 3),
-                text="",
-            )
-            for s in fine_spans
-            if s.end > decode_span.start and s.start < decode_span.end
-        ]
-        if not children:
-            segments.append(
-                TranscriptSegment(
-                    start=round(decode_span.start / float(_SAMPLE_RATE), 3),
-                    end=round(decode_span.end / float(_SAMPLE_RATE), 3),
-                    text=text,
-                )
-            )
-            continue
-        # Обрезать края children по decode_span
-        clipped: List[TranscriptSegment] = []
-        for child in children:
-            start = max(child.start, decode_span.start / float(_SAMPLE_RATE))
-            end = min(child.end, decode_span.end / float(_SAMPLE_RATE))
-            if end - start < 0.01:
-                continue
-            clipped.append(
-                TranscriptSegment(
-                    start=round(start, 3),
-                    end=round(end, 3),
-                    text="",
-                )
-            )
-        if not clipped:
-            continue
-        segments.extend(redistribute_text_to_spans(text, clipped))
-    return segments
 
 
 def _merge_timings(
@@ -133,7 +70,6 @@ async def run_utterance_pipeline(
 
     mels = utterance_mels(samples, plan, profile, timings=timings)
 
-    # Decode всегда без Whisper <|t|>; сегменты — VAD при timestamps=True.
     if len(plan.spans) == 1:
         result = await transport.encode_then_decode(
             mels[0],
@@ -141,6 +77,7 @@ async def run_utterance_pipeline(
             time_offset_sec=0.0,
             task=task,
             language=language,
+            timestamps=timestamps,
             collect_timings=collect_timings,
         )
         if timings is not None and result.timings is not None:
@@ -160,14 +97,6 @@ async def run_utterance_pipeline(
         )
         if timings is not None:
             result.timings = timings
-        if timestamps:
-            segs = _timing_segments_for_plan(samples, plan, [result.text])
-            result = DecodeResult(
-                text=result.text,
-                segments=segs or None,
-                timings=result.timings,
-                truncated=result.truncated,
-            )
         if on_chunk is not None and result.text:
             on_chunk(result)
         return result
@@ -179,6 +108,7 @@ async def run_utterance_pipeline(
             time_offset_sec=span.start / float(_SAMPLE_RATE),
             task=task,
             language=language,
+            timestamps=timestamps,
             collect_timings=collect_timings,
         )
 
@@ -189,6 +119,7 @@ async def run_utterance_pipeline(
     results = await asyncio.gather(*tasks)
 
     parts: List[str] = []
+    all_segments: List[TranscriptSegment] = []
     any_truncated = False
 
     for result in results:
@@ -196,18 +127,19 @@ async def run_utterance_pipeline(
         if on_chunk is not None and result.text:
             on_chunk(result)
         _merge_timings(timings, result)
-        if result.text:
+        if timestamps and result.segments is not None:
+            all_segments.extend(result.segments)
+            if result.text:
+                parts.append(result.text)
+        elif result.text:
             parts.append(result.text)
 
-    text = stitch_transcripts(parts)
-    segments: Optional[List[TranscriptSegment]] = None
     if timestamps:
-        segs = _timing_segments_for_plan(
-            samples,
-            plan,
-            [r.text for r in results],
-        )
-        segments = segs or None
+        text = stitch_transcripts(parts)
+        segments: Optional[List[TranscriptSegment]] = all_segments or None
+    else:
+        text = stitch_transcripts(parts)
+        segments = None
 
     _finalize_timings(
         timings,
@@ -245,6 +177,7 @@ async def utterance_stream(
             time_offset_sec=0.0,
             task=task,
             language=language,
+            timestamps=False,
         )
         if result.text:
             yield result
@@ -258,6 +191,7 @@ async def utterance_stream(
                 time_offset_sec=span.start / float(_SAMPLE_RATE),
                 task=task,
                 language=language,
+                timestamps=False,
             )
             return chunk_id, result
 

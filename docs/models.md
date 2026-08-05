@@ -162,11 +162,8 @@ WHISPER_MODEL_PROFILE=turbo
 | `WHISPER_ONNX_INTRA_OP_THREADS` | `0` | Потоки ONNX decoder: `0`/`auto` = видимые CPU; число = потолок |
 | `WHISPER_MAX_CHUNK_SECONDS` | `30` | Макс. длина VAD-чанка |
 | `WHISPER_VAD_THRESHOLD` | `0.5` | Порог Silero VAD |
-| `WHISPER_VAD_SEARCH_BACK_SEC` | `3` | Окно поиска паузы перед лимитом decode |
-| `WHISPER_VAD_MIN_GAP_MS` | `250` | Мин. длина non-speech для среза decode-окна (~30 с) |
-| `WHISPER_VAD_SEGMENT_MAX_SECONDS` | `5` | Макс. длина сегмента в `verbose_json`/`srt`/`vtt` |
-| `WHISPER_VAD_SEGMENT_MIN_GAP_MS` | `100` | Мин. тишина для мелких timing-сегментов |
-| `WHISPER_VAD_SEGMENT_SEARCH_BACK_FRAMES` | `16` | Поиск паузы у лимита мелкого сегмента (кадры Silero ×32 мс) |
+| `WHISPER_VAD_SEARCH_BACK_SEC` | `3` | Окно поиска паузы перед лимитом |
+| `WHISPER_VAD_MIN_GAP_MS` | `250` | Мин. длина non-speech для среза |
 | `WHISPER_VAD_MODEL` | — | Путь к `silero_vad.onnx` (иначе `/models/silero_vad.onnx`, иначе auto-download в `.cache/`) |
 | `WHISPER_VAD_MODEL_URL` | GitHub silero-vad | URL для auto-download / `download_models.sh` |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |

@@ -113,7 +113,7 @@ Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопр�
 | `srt` | SubRip |
 | `vtt` | WebVTT |
 
-Для `verbose_json`, `srt`, `vtt` текст — из обычного decode (без Whisper timestamp-токенов). Сегменты времени — мелкая VAD-нарезка (`WHISPER_VAD_SEGMENT_*`: меньшая тишина, max ~5 с, поиск паузы на 16 кадрах Silero). Окна decode ~30 с по-прежнему режутся с `WHISPER_VAD_MIN_GAP_MS` / `WHISPER_MAX_CHUNK_SECONDS`.
+Для `verbose_json`, `srt`, `vtt` декодер включает сегментные метки времени Whisper.
 
 ### Streaming (`stream=true`)
 

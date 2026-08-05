@@ -41,51 +41,6 @@ def clean_transcript_segments(
     return cleaned or None
 
 
-def redistribute_text_to_spans(
-    text: str,
-    spans: Sequence["TranscriptSegment"],
-) -> List["TranscriptSegment"]:
-    """Разложить качественный текст по готовым timing-сегментам (по длительности)."""
-    from app.core.types import TranscriptSegment
-
-    words = text.split()
-    if not spans or not words:
-        return []
-
-    durations = [max(0.02, float(s.end) - float(s.start)) for s in spans]
-    total = sum(durations) or float(len(spans))
-    counts: List[int] = []
-    allocated = 0
-    for i, dur in enumerate(durations):
-        if i == len(durations) - 1:
-            counts.append(len(words) - allocated)
-        else:
-            n = int(round(len(words) * dur / total))
-            n = max(0, min(n, len(words) - allocated))
-            counts.append(n)
-            allocated += n
-
-    diff = len(words) - sum(counts)
-    idx = len(counts) - 1
-    while diff != 0 and counts:
-        step = 1 if diff > 0 else -1
-        if counts[idx] + step >= 0:
-            counts[idx] += step
-            diff -= step
-        idx = (idx - 1) % len(counts)
-
-    out: List[TranscriptSegment] = []
-    cursor = 0
-    for span, count in zip(spans, counts, strict=True):
-        part = " ".join(words[cursor : cursor + count]).strip()
-        cursor += count
-        if part:
-            out.append(
-                TranscriptSegment(start=span.start, end=span.end, text=part)
-            )
-    return out
-
-
 def stitch_transcripts(parts: List[str]) -> str:
     """Склеить тексты чанков; убрать дубли overlap (длиннейшее совпадение слов на стыке)."""
     cleaned = [p.strip() for p in parts if p and p.strip()]

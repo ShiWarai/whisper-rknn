@@ -45,7 +45,6 @@ message DecodeRequest {
   repeated Tensor cross_kv = 3;
   string language = 4;
   string task = 5;
-  // Deprecated: Whisper <|t|> decode removed; segments come from VAD pipeline.
   bool timestamps = 6;
   float time_offset_sec = 7;
   string model_profile = 8;
@@ -59,7 +58,6 @@ message EncodeThenDecodeRequest {
   string decode_target = 5;
   string language = 6;
   string task = 7;
-  // Deprecated: ignored by workers (always text-only decode).
   bool timestamps = 8;
   float time_offset_sec = 9;
 }

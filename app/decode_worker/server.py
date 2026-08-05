@@ -65,6 +65,8 @@ class DecodeServicer(worker_pb2_grpc.DecodeServiceServicer):
                     self._id2token,
                     cross_kv,
                     verbose=False,
+                    timestamps=request.timestamps,
+                    time_offset=request.time_offset_sec,
                     task=task,
                     language=language,
                 )
