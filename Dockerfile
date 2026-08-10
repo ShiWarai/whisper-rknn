@@ -1,6 +1,6 @@
 # Whisper RKNN HTTP API — сборка на linux/arm64 (RK3588) с NPU.
 # Перед сборкой: third_party/rknn_toolkit_lite2-2.3.2-*-aarch64.whl + third_party/librknnrt.so
-# Аудио: PyAV in-process (wheel с libav). apt ffmpeg — только CLI fallback.
+# Аудио: PyAV in-process (wheel с libav).
 
 FROM python:3.10-slim-bookworm
 
@@ -15,7 +15,6 @@ RUN apt-get update \
         ca-certificates \
         curl \
         libgomp1 \
-        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/whisper-rknn

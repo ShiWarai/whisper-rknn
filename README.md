@@ -426,6 +426,6 @@ Workflows, GHCR, prerelease `[prerelease]`, Telegram: **[docs/cicd.md](docs/cicd
 
 MIT — см. [LICENSE](LICENSE).
 
-Код приложения — MIT. Бинарники Rockchip в `third_party/` — по условиям Rockchip RKNN SDK. Системный `ffmpeg` в образе — по лицензии Debian (GPL/LGPL компоненты libav).
+Код приложения — MIT. Бинарники Rockchip в `third_party/` — по условиям Rockchip RKNN SDK. PyAV wheel в образе включает libav (GPL/LGPL).
 
 _Проект создан с использованием нейросетей._

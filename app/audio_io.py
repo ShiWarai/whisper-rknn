@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import io
 import os
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import BinaryIO, List, Optional, Tuple, Union
@@ -175,35 +173,6 @@ def _load_via_soundfile_16k(path: str) -> np.ndarray:
     return mono
 
 
-def _load_via_ffmpeg_pipe(path: str) -> np.ndarray:
-    ffmpeg = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg not found")
-
-    cmd = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        path,
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-f",
-        "f32le",
-        "pipe:1",
-    ]
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        stderr = r.stderr.decode(errors="replace")
-        raise RuntimeError(f"ffmpeg failed:\n{stderr}")
-    if not r.stdout:
-        return np.zeros(0, dtype=np.float32)
-    return np.frombuffer(r.stdout, dtype=np.float32).copy()
-
-
 def load_audio_16k_mono(
     source: AudioSource,
     *,
@@ -214,7 +183,7 @@ def load_audio_16k_mono(
     Decode audio to 16 kHz mono float32 in RAM.
 
     Primary path: PyAV (libav API, in-process).
-    Fallbacks: soundfile (WAV/FLAC), CLI ffmpeg f32le pipe (last resort).
+    Fallback: soundfile (WAV/FLAC) if PyAV fails.
     """
     errors: List[str] = []
 
@@ -244,11 +213,6 @@ def load_audio_16k_mono(
                 return _load_via_soundfile_16k(path)
             except Exception as exc:
                 errors.append(f"soundfile: {exc}")
-
-        try:
-            return _load_via_ffmpeg_pipe(path)
-        except Exception as exc:
-            errors.append(f"ffmpeg: {exc}")
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)

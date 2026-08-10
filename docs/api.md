@@ -46,7 +46,7 @@ Authorization: Bearer <ваш_ключ>
 
 Загруженный файл декодируется **in-process** через **PyAV** (libav API) в **16 kHz mono float32** в RAM.
 
-Fallback: `soundfile` (WAV/FLAC), CLI `ffmpeg` → `f32le` pipe. Переопределение: `FFMPEG_BIN` в `.env`.
+Fallback: `soundfile` (WAV/FLAC), если PyAV не справился.
 
 ## `GET /health`
 

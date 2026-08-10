@@ -52,7 +52,6 @@ services:
       WHISPER_MAX_NGRAM_REPEAT: ${WHISPER_MAX_NGRAM_REPEAT:-6}
       WHISPER_API_KEY: ${WHISPER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      FFMPEG_BIN: ${FFMPEG_BIN:-}
     volumes:
       - ${WHISPER_MODELS_DIR}:/models
     networks:

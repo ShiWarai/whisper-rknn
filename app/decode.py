@@ -5,7 +5,7 @@
 """
 Whisper RKNN: fbank -> encoder/decoder RKNN -> text.
 Аудио: PyAV (libav in-process) -> 16 kHz mono float32 в RAM.
-Fallback: soundfile (WAV/FLAC), CLI ffmpeg (f32le pipe).
+Fallback: soundfile (WAV/FLAC).
 """
 
 from __future__ import annotations

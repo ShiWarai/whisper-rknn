@@ -18,7 +18,7 @@
 
 Сервис отказывается загружать модель при старте и возвращает **507** на `/v1/audio/transcriptions`, если прогноз не влезает в `MemAvailable` (см. `WHISPER_MAX_AUDIO_SECONDS` в [api.md](api.md#переменные-окружения)).
 
-Контейнер: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel + apt ffmpeg, без PyTorch).
+Контейнер: `privileged: true`, `platform: linux/arm64`, порты на хост **не** публикуются. Размер образа ~**350 MB** (slim Python + PyAV wheel, без PyTorch).
 
 На хосте для `librknnrt` нужны `/dev/dri` и `/dev/dma_heap` — проброшены в `docker-compose.yml` (MPP/RGA для ASR не требуются).
 
@@ -129,7 +129,7 @@ WHISPER_MODEL_PROFILE=turbo
 1. `encoder.rknn` должен быть собран toolchain, совместимым с `librknnrt.so` из [`third_party/`](../third_party/README.md).
 2. Целевая платформа inference: **RK3588** (`privileged: true` в compose для доступа к NPU).
 3. Версия `rknn_toolkit_lite2` / `librknnrt.so` в образе: **2.3.2** ([airockchip/rknn-toolkit2](https://github.com/airockchip/rknn-toolkit2), см. `Dockerfile`).
-4. Декод аудио: **PyAV** (libav API in-process, wheel в образе); fallback — CLI `ffmpeg` из `apt`. Устройства NPU в `docker-compose.yml` — для RKNN encoder.
+4. Декод аудио: **PyAV** (libav in-process, wheel в образе); fallback — `soundfile` для WAV/FLAC. Устройства NPU в `docker-compose.yml` — для RKNN encoder.
 
 ## Раскладка файлов
 
@@ -168,4 +168,3 @@ WHISPER_MODEL_PROFILE=turbo
 | `WHISPER_VAD_MODEL_URL` | GitHub silero-vad | URL для auto-download / `download_models.sh` |
 | `WHISPER_MODELS_DIR` | — | Путь на хосте (volume в compose) |
 | `LIBRKNNRT_SO` | — | Опциональный override пути к `.so` |
-| `FFMPEG_BIN` | из `PATH` | Fallback CLI ffmpeg (основной путь — PyAV) |
