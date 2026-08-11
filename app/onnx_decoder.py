@@ -1,4 +1,4 @@
-"""CPU ONNX Runtime backend for Whisper decoder (RKNN encoder stays on NPU)."""
+"""CPU ONNX Runtime для декодера Whisper (энкодер остаётся на NPU RKNN)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover - optional at import time
 
 
 class OnnxDecoder:
-    """Run sherpa-exported Whisper decoder via ONNX Runtime (CPU)."""
+    """Запуск экспортированного sherpa Whisper decoder через ONNX Runtime (CPU)."""
 
     def __init__(self, model_path: str, *, n_text_layer: int):
         if ort is None:
@@ -27,7 +27,9 @@ class OnnxDecoder:
 
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
-        opts.intra_op_num_threads = max(1, int(__import__("os").cpu_count() or 1))
+        from app.worker_runtime import resolve_onnx_intra_op_threads
+
+        opts.intra_op_num_threads = resolve_onnx_intra_op_threads()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         self._session = ort.InferenceSession(
@@ -156,7 +158,7 @@ def resolve_decoder_backend(
             raise FileNotFoundError("WHISPER_DECODER_BACKEND=rknn but decoder.rknn not found")
         return "rknn", str(rknn_path.resolve())
 
-    # auto
+    # auto — выбор backend по наличию файлов
     if onnx_path is not None:
         return "onnx", str(onnx_path.resolve())
     if rknn_path is not None:

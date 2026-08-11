@@ -1,4 +1,4 @@
-"""Unit tests for app.speech_cut (no RKNN)."""
+"""Тесты app.speech_cut (без RKNN)."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def _probs_from_mask(mask: list[bool]) -> np.ndarray:
 
 
 def test_find_cut_sample_prefers_long_gap():
-    # Gap near the 30s boundary (frames 27-29 of 30-frame window)
+    # Пауза у границы 30 с (кадры 27–29 в окне из 30 кадров)
     mask = [True] * 27 + [False] * 3 + [True] * 10
     probs = _probs_from_mask(mask)
     cut, reason = find_cut_sample(

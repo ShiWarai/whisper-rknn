@@ -1,5 +1,12 @@
-# Тестовое окружение: образ с тегом :prerelease из GHCR.
-# Предварительно: docker pull ghcr.io/shiwarai/whisper-rknn:prerelease
+# Тестовый стенд: готовый образ из GHCR (тег :prerelease).
+# Локальная сборка отключена — только pull.
+#
+# docker pull ghcr.io/shiwarai/whisper-rknn:prerelease
+# docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
+#
+# Собирается из dev ([prerelease] в коммите или ручной workflow).
+# Не продакшен — кандидат на проверку до merge в main. См. docs/cicd.md.
+
 services:
   whisper-rknn:
     image: ghcr.io/shiwarai/whisper-rknn:prerelease

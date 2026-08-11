@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenAI-compatible Whisper RKNN HTTP API (hwdsl2/docker-whisper contract)."""
+"""HTTP API Whisper RKNN, совместимый с OpenAI (контракт hwdsl2/docker-whisper)."""
 
 from __future__ import annotations
 
@@ -17,24 +17,21 @@ import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 
+from app.audio_io import load_audio_16k_mono
 from app.auth import require_api_key
+from app.core.model_config import ModelProfile, model_config_from_encoder_path
+from app.core.types import TaskType
 from app.decode import (
     RKNNModel,
-    TaskType,
-    _install_root,
     apply_librknnrt_from_optional_path,
-    decode_utterance,
-    decode_utterance_stream,
-    load_audio_16k_mono,
     load_tokens,
-    model_config_from_encoder_path,
     parallel_encode_enabled,
     resolve_decoder_backend,
     resolve_librknnrt_path,
-    stitch_transcripts,
 )
 from app.encode_pool import resolve_encoder_worker_count
-from app.openai_response import format_transcription_response, stream_sse_frames
+from app.openai_response import format_transcription_response, stream_transcription_sse
+from app.runtime.backend import AsrBackend, GrpcBackend, LocalBackend, runtime_mode
 from app.system_memory import (
     estimate_encoder_pool_ram_bytes,
     estimate_model_ram_bytes,
@@ -52,7 +49,7 @@ _AUDIO_SUFFIXES = frozenset(
 
 
 def _restore_std_log_levels() -> None:
-    """rknnlite modifies logging._nameToLevel; restore std names for uvicorn."""
+    """rknnlite меняет logging._nameToLevel; восстанавливаем имена для uvicorn."""
     import logging as _logging
 
     _logging._nameToLevel.update(
@@ -79,10 +76,15 @@ _host = os.environ.get("HOST", "0.0.0.0")
 _port = int(os.environ.get("PORT", "8080"))
 _max_upload_mb = int(os.environ.get("MAX_UPLOAD_MB", "25"))
 
+_max_inflight_jobs = max(1, int(os.environ.get("MAX_INFLIGHT_JOBS", "2")))
+
+_backend: Optional[AsrBackend] = None
 _model: Optional[RKNNModel] = None
 _id2token: Optional[dict] = None
 _model_name: str = "whisper-1"
 _infer_lock = asyncio.Lock()
+_job_semaphore = asyncio.Semaphore(_max_inflight_jobs)
+_runtime = runtime_mode()
 
 
 def _active_model_name() -> str:
@@ -141,6 +143,11 @@ def _validate_timestamp_granularities(granularities: List[str]) -> None:
 
 def _load_model_sync() -> None:
     global _model, _id2token, _model_name
+    from app.worker_runtime import apply_worker_cpu_affinity
+
+    pinned = apply_worker_cpu_affinity()
+    if pinned is not None:
+        print(f"worker cpu affinity: {sorted(pinned)}")
     models_dir = os.environ.get("WHISPER_MODELS_DIR", "").strip()
     if models_dir:
         print("model bundle:", Path(models_dir).name)
@@ -234,9 +241,62 @@ def _load_model_sync() -> None:
         preload_vad()
         vad_ms = (time.perf_counter() - t0) * 1000.0
         print(
-            f"encoder_pool: {_model.encoder_workers} worker(s); "
-            f"silero_vad ready ({resolve_vad_model_path()}, {vad_ms:.0f} ms)"
+            f"encoder_pool: {_model.encoder_workers} worker(s) "
+            f"[shared weights]; silero_vad ready "
+            f"({resolve_vad_model_path()}, {vad_ms:.0f} ms)"
         )
+    _model_name = _active_model_name()
+
+
+def _install_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _check_request_ram(body_len: int) -> None:
+    if _backend is None:
+        return
+    profile = _backend.profile
+    request_ram_need = estimate_request_ram_bytes(
+        body_len,
+        profile.n_mels,
+        profile.n_text_layer,
+        profile.n_text_ctx,
+        profile.n_text_state,
+    )
+    ok, reason = has_enough_ram(request_ram_need)
+    if not ok:
+        raise HTTPException(status_code=507, detail=reason)
+
+
+async def _startup() -> None:
+    global _backend, _model, _id2token, _model_name
+    loop = asyncio.get_running_loop()
+
+    if _runtime == "distributed":
+        _backend = await GrpcBackend.create()
+        _model_name = _active_model_name()
+        await loop.run_in_executor(None, _preload_vad)
+        print(
+            f"api: distributed runtime profile={_backend.profile.size_key} "
+            f"model={_model_name}"
+        )
+    else:
+        await loop.run_in_executor(None, _load_model_sync)
+        profile = ModelProfile.from_encoder_path(_encoder_path)
+        assert _model is not None and _id2token is not None
+        _backend = LocalBackend(_model, _id2token, profile)
+        print(f"api: local runtime profile={profile.size_key} model={_model_name}")
+
+    _log_auth_state()
+
+
+def _preload_vad() -> None:
+    from app.speech_cut import preload_vad
+
+    preload_vad()
+
+
+def _log_auth_state() -> None:
     from app.auth import auth_enabled
 
     if auth_enabled():
@@ -245,18 +305,23 @@ def _load_model_sync() -> None:
         print("api auth: disabled (set WHISPER_API_KEY to require Authorization header)")
 
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _load_model_sync)
-    yield
-    global _model
-    if _model is not None:
-        await loop.run_in_executor(None, _model.release)
-        _model = None
+async def _shutdown() -> None:
+    global _backend, _model, _id2token
+    if _backend is not None:
+        await _backend.shutdown()
+        _backend = None
+    _model = None
+    _id2token = None
     from app.speech_cut import release_vad
 
     release_vad()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await _startup()
+    yield
+    await _shutdown()
 
 
 app = FastAPI(
@@ -268,9 +333,12 @@ app = FastAPI(
 
 @app.get("/health", include_in_schema=False)
 async def health():
-    ok = _model is not None and _id2token is not None
+    ok = _backend is not None
     if ok:
-        return {"status": "ok", "model": _model_name}
+        payload = {"status": "ok", "model": _model_name}
+        if _runtime == "distributed":
+            payload["runtime"] = "distributed"
+        return payload
     return {"status": "loading"}
 
 
@@ -303,21 +371,6 @@ async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
     return body, suffix
 
 
-def _check_request_ram(body_len: int) -> None:
-    if _model is None:
-        return
-    request_ram_need = estimate_request_ram_bytes(
-        body_len,
-        _model.n_mels,
-        _model.n_text_layer,
-        _model.n_text_ctx,
-        _model.n_text_state,
-    )
-    ok, reason = has_enough_ram(request_ram_need)
-    if not ok:
-        raise HTTPException(status_code=507, detail=reason)
-
-
 async def _handle_audio(
     task: TaskType,
     file: UploadFile,
@@ -329,10 +382,10 @@ async def _handle_audio(
     stream: Optional[str],
     timestamp_granularities: List[str],
 ) -> Response:
-    if _model is None or _id2token is None:
-        raise HTTPException(status_code=503, detail="Model not ready")
+    if _backend is None:
+        raise HTTPException(status_code=503, detail="API not ready")
 
-    if task == "translate" and _model.english_only:
+    if task == "translate" and _backend.english_only:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -371,68 +424,54 @@ async def _handle_audio(
     cache_dir = _install_root() / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    async with _infer_lock:
-        loop = asyncio.get_running_loop()
+    # Decode outside the infer lock: PyAV does not need NPU, and dropping `body`
+    # right after PCM avoids holding upload+PCM together through the whole job.
+    try:
+        samples = load_audio_16k_mono(
+            io.BytesIO(body),
+            format_hint=suffix,
+            cache_dir=cache_dir,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        del body
 
-        if stream_flag:
-            def _stream_chunks():
-                samples = load_audio_16k_mono(
-                    io.BytesIO(body),
-                    format_hint=suffix,
-                    cache_dir=cache_dir,
-                )
-                chunk_texts: List[str] = []
-                for chunk_result in decode_utterance_stream(
-                    _model,
-                    _id2token,
-                    samples,
-                    verbose=False,
-                    timestamps=False,
+    duration = len(samples) / 16000.0
+    lock = _job_semaphore if _runtime == "distributed" else _infer_lock
+
+    if stream_flag:
+        # Hold the lock for the whole SSE lifetime so local NPU stays single-flight
+        # (previously StreamingResponse returned inside `async with` and released early).
+        pcm = samples
+
+        async def _sse_under_lock():
+            async with lock:
+                async for frame in stream_transcription_sse(
+                    _backend,
+                    pcm,
                     task=task,
                     language=resolved_lang,
                 ):
-                    chunk_texts.append(chunk_result.text)
-                full_text = stitch_transcripts(chunk_texts)
-                return chunk_texts, full_text
-
-            try:
-                chunk_texts, full_text = await loop.run_in_executor(
-                    None, _stream_chunks
-                )
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e)) from e
-            except FileNotFoundError as e:
-                raise HTTPException(status_code=400, detail=str(e)) from e
-            except RuntimeError as e:
-                raise HTTPException(status_code=400, detail=str(e)) from e
-
-            frames = stream_sse_frames(chunk_texts, full_text)
-
-            async def _event_stream():
-                for frame in frames:
                     yield frame
 
-            return StreamingResponse(
-                _event_stream(),
-                media_type="text/event-stream",
-                headers={
-                    "X-Accel-Buffering": "no",
-                    "Cache-Control": "no-cache",
-                },
-            )
+        return StreamingResponse(
+            _sse_under_lock(),
+            media_type="text/event-stream",
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-cache",
+            },
+        )
 
-        def _run():
-            samples = load_audio_16k_mono(
-                io.BytesIO(body),
-                format_hint=suffix,
-                cache_dir=cache_dir,
-            )
-            duration = len(samples) / 16000.0
-            result = decode_utterance(
-                _model,
-                _id2token,
+    async with lock:
+        try:
+            result = await _backend.decode_utterance(
                 samples,
-                verbose=False,
                 timestamps=timestamps,
                 task=task,
                 language=resolved_lang,
@@ -440,16 +479,12 @@ async def _handle_audio(
             )
             if result.timings is not None:
                 logger.info("decode timings: %s", result.timings.to_dict())
-            return result, duration
-
-        try:
-            result, duration = await loop.run_in_executor(None, _run)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
-        except RuntimeError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     body_out, media_type = format_transcription_response(
         result,

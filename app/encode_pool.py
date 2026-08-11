@@ -1,4 +1,4 @@
-"""Parallel RKNN encoder workers with per-core pinning (video-descriptor pattern)."""
+"""Параллельные RKNN encoder-воркеры с привязкой к ядру NPU (паттерн video-descriptor)."""
 
 from __future__ import annotations
 
@@ -39,11 +39,10 @@ class EncodeJobResult:
 
 def dedicated_npu_core_masks() -> Tuple[int, ...]:
     """
-    Single-core NPU masks available in the installed rknnlite.
+    Маски NPU по одному ядру, доступные в установленном rknnlite.
 
-    Discovers ``NPU_CORE_0``, ``NPU_CORE_1``, … (power-of-two masks only),
-    so RK3588 yields 3 today and future SoCs with more cores are picked up
-    automatically when the runtime exposes them.
+    Обнаруживает ``NPU_CORE_0``, ``NPU_CORE_1``, … (только маски — степени двойки);
+    на RK3588 сейчас 3; будущие SoC подхватятся автоматически, если runtime их отдаёт.
     """
     if RKNNLite is None:
         raise RuntimeError("rknnlite is not installed")
@@ -55,7 +54,7 @@ def dedicated_npu_core_masks() -> Tuple[int, ...]:
                 break
             continue
         val = int(getattr(RKNNLite, name))
-        # Skip AUTO(0) and multi-core OR-masks (not powers of two).
+        # Пропускаем AUTO(0) и OR-маски нескольких ядер (не степени двойки).
         if val > 0 and (val & (val - 1)) == 0:
             masks.append(val)
     if not masks:
@@ -63,26 +62,45 @@ def dedicated_npu_core_masks() -> Tuple[int, ...]:
     return tuple(masks)
 
 
+def allowed_npu_core_masks() -> Tuple[int, ...]:
+    """
+    Dedicated NPU cores с учётом ``WHISPER_NPU_CORE_MASK``.
+
+    Пул encoder-воркеров использует только эти маски (по одному ядру на воркер).
+    """
+    from app.decode import resolve_npu_core_mask
+
+    composite = int(resolve_npu_core_mask())
+    filtered = tuple(m for m in dedicated_npu_core_masks() if m & composite == m)
+    if not filtered:
+        raw = os.environ.get("WHISPER_NPU_CORE_MASK", "0_1_2")
+        raise ValueError(
+            f"WHISPER_NPU_CORE_MASK={raw!r} excludes all dedicated NPU cores "
+            f"{dedicated_npu_core_masks()}"
+        )
+    return filtered
+
+
 def default_max_encoder_workers() -> int:
-    """Ceiling for auto/forced workers: env override or discovered core count."""
+    """Верхняя граница auto/принудительных воркеров: env или число обнаруженных ядер."""
     raw = os.environ.get("WHISPER_ENCODER_MAX_WORKERS", "").strip()
     if raw:
         try:
             return max(1, int(raw))
         except ValueError:
             pass
-    return max(1, len(dedicated_npu_core_masks()))
+    return max(1, len(allowed_npu_core_masks()))
 
 
 def core_mask_for_worker(index: int, n_workers: Optional[int] = None) -> int:
     """
-    Pin worker *index* to its own dedicated NPU core (never AUTO).
+    Привязать воркер *index* к выделенному ядру NPU (никогда AUTO).
 
-    ``n_workers`` is accepted for call-site compatibility; each worker still
-    gets ``dedicated_masks[index]``.
+    ``n_workers`` принимается для совместимости вызовов; каждый воркер всё равно
+    получает ``dedicated_masks[index]``.
     """
-    del n_workers  # reserved / API compat
-    masks = dedicated_npu_core_masks()
+    del n_workers  # зарезервировано / совместимость API
+    masks = allowed_npu_core_masks()
     if index < 0 or index >= len(masks):
         raise ValueError(
             f"encoder worker index {index} needs a dedicated core; "
@@ -104,7 +122,8 @@ def core_mask_name(mask: int) -> str:
 
 
 def _release_list(sessions: List) -> None:
-    for session in sessions:
+    # Дубли контекста делят веса с sessions[0]; сначала освобождаем дубли.
+    for session in reversed(sessions):
         try:
             session.release()
         except Exception:
@@ -119,25 +138,29 @@ def _probe_npu_capacity_worker(
     mel_time_frames: int,
 ) -> None:
     """
-    Child process: load N encoders + one forward. Exit 0 if OK.
+    Дочерний процесс: загрузить N encoder'ов (общие веса) + один forward. Exit 0 при успехе.
 
-    Runs in a subprocess so an RKNN native abort cannot kill the API process.
+    В subprocess, чтобы нативный abort RKNN не убил процесс API.
     """
     import sys
+
+    from app.rknn_share import load_shared_encoder_sessions
 
     sessions: List = []
     ok = False
     try:
         mel = np.zeros((1, int(n_mels), int(mel_time_frames)), dtype=np.float32)
-        for i in range(n_workers):
-            mask = core_mask_for_worker(i, n_workers)
-            sessions.append(
-                _init_model(
-                    encoder_path,
-                    target_platform=target_platform,
-                    core_mask=mask,
-                )
-            )
+        masks = [core_mask_for_worker(i, n_workers) for i in range(n_workers)]
+        sessions = load_shared_encoder_sessions(
+            encoder_path,
+            masks,
+            init_model=lambda path, core_mask: _init_model(
+                path,
+                target_platform=target_platform,
+                core_mask=core_mask,
+            ),
+            verbose=False,
+        )
         out = sessions[0].inference(inputs=[np.ascontiguousarray(mel)])
         if out is None:
             raise RuntimeError("warmup returned None")
@@ -159,10 +182,10 @@ def probe_npu_worker_count(
     verbose: bool = True,
     join_timeout_s: float = 180.0,
 ) -> int:
-    """Largest N in 1..max that survives load+warmup in a subprocess."""
+    """Наибольшее N из 1..max, проходящее load+warmup в subprocess."""
     if max_workers is None:
         max_workers = default_max_encoder_workers()
-    core_limit = len(dedicated_npu_core_masks())
+    core_limit = len(allowed_npu_core_masks())
     capped = max(1, min(int(max_workers), core_limit))
     ctx = mp.get_context("spawn")
     for try_n in range(capped, 0, -1):
@@ -197,7 +220,7 @@ def probe_npu_worker_count(
 
 
 class EncoderPool:
-    """Thread pool of RKNN encoder sessions, one dedicated NPU core per worker."""
+    """Пул потоков RKNN encoder-сессий с общими весами, по одному ядру на воркер."""
 
     def __init__(
         self,
@@ -213,7 +236,7 @@ class EncoderPool:
             n_workers = default_max_encoder_workers()
         if n_workers < 1:
             raise ValueError("n_workers must be >= 1")
-        core_limit = len(dedicated_npu_core_masks())
+        core_limit = len(allowed_npu_core_masks())
         if n_workers > core_limit:
             raise ValueError(
                 f"n_workers={n_workers} exceeds dedicated NPU cores ({core_limit})"
@@ -262,27 +285,27 @@ class EncoderPool:
         self._workers.clear()
 
     def _load_sessions(self, n_workers: int, *, target_platform: str) -> List:
-        """Load all RKNN contexts first; start threads only after full success."""
-        sessions: List = []
-        try:
-            for i in range(n_workers):
-                mask = core_mask_for_worker(i, n_workers)
-                if self._verbose:
-                    print(
-                        f"encoder_pool worker {i}: {core_mask_name(mask)} ({mask})",
-                        flush=True,
-                    )
-                sessions.append(
-                    _init_model(
-                        self._encoder_path,
-                        target_platform=target_platform,
-                        core_mask=mask,
-                    )
+        """Загрузить одну RKNN-модель, dup контексты для остальных; потоки после успеха."""
+        from app.rknn_share import load_shared_encoder_sessions
+
+        masks = [core_mask_for_worker(i, n_workers) for i in range(n_workers)]
+        if self._verbose:
+            for i, mask in enumerate(masks):
+                kind = "load" if i == 0 else "dup"
+                print(
+                    f"encoder_pool worker {i}: {core_mask_name(mask)} ({mask}) [{kind}]",
+                    flush=True,
                 )
-            return sessions
-        except Exception:
-            _release_list(sessions)
-            raise
+        return load_shared_encoder_sessions(
+            self._encoder_path,
+            masks,
+            init_model=lambda path, core_mask: _init_model(
+                path,
+                target_platform=target_platform,
+                core_mask=core_mask,
+            ),
+            verbose=self._verbose,
+        )
 
     def _start_threads(self) -> None:
         self._workers.clear()
@@ -359,18 +382,18 @@ def resolve_encoder_worker_count(
     credit_bytes: int = 0,
 ) -> int:
     """
-    Resolve WHISPER_ENCODER_WORKERS.
+    Разрешить WHISPER_ENCODER_WORKERS.
 
-    ``0`` / unset = auto (largest N that fits MemAvailable, capped by dedicated
-    NPU core count / ``WHISPER_ENCODER_MAX_WORKERS``). EncoderPool then probes
-    N→…→1 in a subprocess. Explicit N forces that probe ceiling.
-    Returns 0 when auto finds nothing fits in RAM.
+    ``0`` / не задано = auto (наибольшее N по MemAvailable, с потолком по числу
+    dedicated NPU core / ``WHISPER_ENCODER_MAX_WORKERS``). EncoderPool затем
+    пробует N→…→1 в subprocess. Явное N задаёт потолок probe.
+    0 — если auto не находит вариант, влезающий в RAM.
     """
     from app.system_memory import pick_encoder_worker_count
 
     if max_workers is None:
         max_workers = default_max_encoder_workers()
-    core_limit = len(dedicated_npu_core_masks())
+    core_limit = len(allowed_npu_core_masks())
     max_workers = max(1, min(int(max_workers), core_limit))
 
     if requested is None:
