@@ -17,11 +17,7 @@ def clean_transcript_text(text: str) -> str:
     if not text:
         return ""
     out = _WATERMARK_RE.sub("", text)
-    out = re.sub(r"\s+", " ", out).strip()
-    out = re.sub(r"\s*([.,!?;:])\s*", r"\1 ", out)
-    out = re.sub(r"([.,!?;:])\s*\1+", r"\1", out)
-    out = re.sub(r"\s+", " ", out).strip()
-    return out.strip(".,!?;: «»\"'()[]")
+    return re.sub(r"\s+", " ", out).strip()
 
 
 def clean_transcript_segments(

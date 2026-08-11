@@ -11,7 +11,7 @@ def test_clean_transcript_text_removes_dimatorzok_watermark():
     assert clean_transcript_text("субтитры создавал dima torzok") == ""
     assert (
         clean_transcript_text("Привет. Субтитры создавал DimaTorzok. Пока.")
-        == "Привет. Пока"
+        == "Привет. . Пока."
     )
 
 
