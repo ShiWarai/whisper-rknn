@@ -203,6 +203,56 @@ def test_transcriptions_stream_sse(client):
     assert "[DONE]" in body
 
 
+def test_index_serves_web_ui(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "")
+    assert "Whisper STT" in response.text
+    assert "/api/v1/audio/transcriptions" in response.text
+
+
+def test_api_v1_models_alias(client):
+    response = client.get("/api/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["object"] == "list"
+    assert body["data"][0]["id"] == "turbo"
+
+
+def test_api_v1_transcriptions_alias(client):
+    import app.api_server as srv
+
+    srv._backend.decode_utterance = AsyncMock(return_value=DecodeResult(text="привет"))
+    with (
+        patch("app.api_server.has_enough_ram", return_value=(True, "")),
+        patch(
+            "app.api_server.load_audio_16k_mono",
+            return_value=__import__("numpy").zeros(16000, dtype="float32"),
+        ),
+    ):
+        response = client.post(
+            "/api/v1/audio/transcriptions",
+            files={"file": ("voice.ogg", b"fake-audio", "audio/ogg")},
+            data={"model": "whisper-1", "language": "ru"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"text": "привет"}
+    assert srv._backend.decode_utterance.await_args.kwargs.get("task") == "transcribe"
+
+
+def test_api_v1_transcriptions_requires_api_key_when_configured(client, monkeypatch):
+    monkeypatch.setenv("WHISPER_API_KEY", "sk-test-secret")
+    reload_api_keys()
+
+    response = client.post(
+        "/api/v1/audio/transcriptions",
+        files={"file": ("voice.ogg", b"fake-audio", "audio/ogg")},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"]["code"] == "invalid_api_key"
+
+
 def test_translations(client):
     import app.api_server as srv
 

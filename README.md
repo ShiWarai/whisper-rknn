@@ -130,9 +130,12 @@ docker compose -f docker-compose.yml -f docker-compose.prerelease.yml up -d
 | Метод | Путь |
 |-------|------|
 | GET | `/health` |
+| GET | `/` (web UI) |
 | GET | `/v1/models` |
 | POST | `/v1/audio/transcriptions` |
 | POST | `/v1/audio/translations` |
+
+Web UI (`GET /`) звонит в алиасы `/api/v1/models`, `/api/v1/audio/transcriptions`, `/api/v1/audio/translations` — те же обработчики и auth, в OpenAPI не показываются.
 
 Проверка после старта:
 
@@ -339,6 +342,8 @@ whisper-rknn/
 │   ├── onnx_decoder.py       # CPU ONNX decoder (hybrid)
 │   ├── audio_features.py     # mel-спектрограмма (numpy + knf)
 │   ├── whisper_languages.py  # language token ids без openai-whisper
+│   ├── static/
+│   │   └── index.html        # web UI (GET /, /api/v1/* алиасы)
 │   └── assets/
 │       └── mel_filters.npz   # Whisper mel filters (80/128)
 ├── proto/whisper_rknn/v1/    # gRPC worker.proto

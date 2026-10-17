@@ -15,7 +15,13 @@ from typing import List, Optional
 
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    StreamingResponse,
+)
 
 from app.audio_io import load_audio_16k_mono
 from app.auth import require_api_key
@@ -75,6 +81,8 @@ _tokens_path = os.environ.get("WHISPER_TOKENS", "")
 _host = os.environ.get("HOST", "0.0.0.0")
 _port = int(os.environ.get("PORT", "8080"))
 _max_upload_mb = int(os.environ.get("MAX_UPLOAD_MB", "25"))
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 _max_inflight_jobs = max(1, int(os.environ.get("MAX_INFLIGHT_JOBS", "2")))
 
@@ -342,6 +350,12 @@ async def health():
     return {"status": "loading"}
 
 
+@app.get("/", include_in_schema=False)
+async def index():
+    """Web UI (app/static/index.html), same-origin /api/v1/* calls."""
+    return FileResponse(STATIC_DIR / "index.html")
+
+
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])
 async def list_models():
     return {
@@ -355,6 +369,12 @@ async def list_models():
             }
         ],
     }
+
+
+@app.get("/api/v1/models", dependencies=[Depends(require_api_key)], include_in_schema=False)
+async def api_list_models():
+    """Native alias of /v1/models (web UI behind auth-inject proxy)."""
+    return await list_models()
 
 
 async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
@@ -525,6 +545,27 @@ async def transcribe(
     )
 
 
+@app.post(
+    "/api/v1/audio/transcriptions",
+    dependencies=[Depends(require_api_key)],
+    include_in_schema=False,
+)
+async def api_transcribe(
+    request: Request,
+    file: UploadFile = File(...),
+    model: str = Form(default="whisper-1"),
+    language: Optional[str] = Form(default=None),
+    prompt: Optional[str] = Form(default=None),
+    response_format: str = Form(default="json"),
+    temperature: float = Form(default=0.0),
+    stream: Optional[str] = Form(default=None),
+):
+    """Native alias of /v1/audio/transcriptions (web UI behind auth-inject proxy)."""
+    return await transcribe(
+        request, file, model, language, prompt, response_format, temperature, stream
+    )
+
+
 @app.post("/v1/audio/translations", dependencies=[Depends(require_api_key)])
 async def translate(
     file: UploadFile = File(...),
@@ -545,6 +586,32 @@ async def translate(
         temperature=temperature,
         stream=stream,
         timestamp_granularities=["segment"],
+    )
+
+
+@app.post(
+    "/api/v1/audio/translations",
+    dependencies=[Depends(require_api_key)],
+    include_in_schema=False,
+)
+async def api_translate(
+    file: UploadFile = File(...),
+    model: str = Form(default="whisper-1"),
+    language: Optional[str] = Form(default=None),
+    prompt: Optional[str] = Form(default=None),
+    response_format: str = Form(default="json"),
+    temperature: float = Form(default=0.0),
+    stream: Optional[str] = Form(default=None),
+):
+    """Native alias of /v1/audio/translations (web UI behind auth-inject proxy)."""
+    return await translate(
+        file=file,
+        model=model,
+        language=language,
+        prompt=prompt,
+        response_format=response_format,
+        temperature=temperature,
+        stream=stream,
     )
 
 

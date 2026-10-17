@@ -13,6 +13,18 @@ export OPENAI_BASE_URL=http://whisper-rknn-api:9003/v1
 export OPENAI_API_KEY=your-key-or-any-non-empty
 ```
 
+## Web UI
+
+`GET /` отдаёт веб-интерфейс (`app/static/index.html`): загрузка/запись аудио, язык, формат ответа (`json`, `verbose_json`, `srt`, `vtt`), token в `localStorage`.
+
+UI звонит в same-origin алиасы — те же обработчики и auth, как у OpenAI-совместимых путей, в OpenAPI не показываются:
+
+| Метод | Путь |
+|-------|------|
+| GET | `/api/v1/models` |
+| POST | `/api/v1/audio/transcriptions` |
+| POST | `/api/v1/audio/translations` |
+
 ## Авторизация (OpenAI-совместимая)
 
 Если задан **`WHISPER_API_KEY`** (или **`OPENAI_API_KEY`** как alias), защищённые эндпоинты требуют заголовок:
