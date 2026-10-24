@@ -16,7 +16,6 @@ from typing import List, Optional
 import uvicorn
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import (
-    FileResponse,
     JSONResponse,
     PlainTextResponse,
     Response,
@@ -81,8 +80,6 @@ _tokens_path = os.environ.get("WHISPER_TOKENS", "")
 _host = os.environ.get("HOST", "0.0.0.0")
 _port = int(os.environ.get("PORT", "8080"))
 _max_upload_mb = int(os.environ.get("MAX_UPLOAD_MB", "25"))
-
-STATIC_DIR = Path(__file__).parent / "static"
 
 _max_inflight_jobs = max(1, int(os.environ.get("MAX_INFLIGHT_JOBS", "2")))
 
@@ -348,12 +345,6 @@ async def health():
             payload["runtime"] = "distributed"
         return payload
     return {"status": "loading"}
-
-
-@app.get("/", include_in_schema=False)
-async def index():
-    """Web UI (app/static/index.html), same-origin /api/v1/* calls."""
-    return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/v1/models", dependencies=[Depends(require_api_key)])

@@ -203,14 +203,6 @@ def test_transcriptions_stream_sse(client):
     assert "[DONE]" in body
 
 
-def test_index_serves_web_ui(client):
-    response = client.get("/")
-    assert response.status_code == 200
-    assert "text/html" in response.headers.get("content-type", "")
-    assert "Whisper STT" in response.text
-    assert "/api/v1/audio/transcriptions" in response.text
-
-
 def test_api_v1_models_alias(client):
     response = client.get("/api/v1/models")
     assert response.status_code == 200
