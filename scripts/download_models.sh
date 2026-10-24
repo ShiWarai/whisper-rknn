@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Download Whisper turbo RKNN + ONNX decoder weights into MODELS_DIR.
+# Скачать веса Whisper turbo RKNN + ONNX decoder в MODELS_DIR.
 #
-# Presets (WHISPER_DOWNLOAD_MODELS or first argument):
-#   turbo | 1 — ShiWarai/sherpa-rknn-whisper-turbo on Hugging Face
+# Пресеты (WHISPER_DOWNLOAD_MODELS или первый аргумент):
+#   turbo | 1 — ShiWarai/sherpa-rknn-whisper-turbo на Hugging Face
 #     (encoder.rknn, decoder.onnx, tokens.txt)
 #
-# Custom URLs (WHISPER_MODEL_URLS), comma- or newline-separated:
+# Свои URL (WHISPER_MODEL_URLS), через запятую или с новой строки:
 #   local_filename=https://host/path/file.rknn
 #
-# Only requested files are downloaded and verified.
+# Скачиваются и проверяются только запрошенные файлы.
 set -euo pipefail
 
 MODELS_DIR="${MODELS_DIR:-/models}"
@@ -16,6 +16,68 @@ HF_BASE="${WHISPER_HF_BASE:-https://huggingface.co/ShiWarai}"
 HF_TURBO_REPO="${WHISPER_HF_TURBO_REPO:-sherpa-rknn-whisper-turbo}"
 
 mkdir -p "${MODELS_DIR}"
+
+DOWNLOAD_LOG_INTERVAL_SEC="${DOWNLOAD_LOG_INTERVAL_SEC:-10}"
+
+fmt_size() {
+  local bytes="$1"
+  if command -v numfmt >/dev/null 2>&1; then
+    numfmt --to=iec-i --suffix=B "${bytes}" 2>/dev/null || echo "${bytes} B"
+  else
+    echo "${bytes} B"
+  fi
+}
+
+remote_content_length() {
+  local url="$1"
+  curl -fsIL --retry 3 --retry-delay 2 "${url}" 2>/dev/null \
+    | awk -F': ' 'tolower($1) ~ /^content-length$/ { len=$2 } END { gsub(/\r/, "", len); print len }'
+}
+
+download_with_progress() {
+  local tmp="$1"
+  local url="$2"
+  local label="$3"
+
+  rm -f "${tmp}"
+  local expected
+  expected="$(remote_content_length "${url}" || true)"
+
+  if [[ -n "${expected}" && "${expected}" -gt 0 ]]; then
+    echo "download: ${label} size $(fmt_size "${expected}")"
+  fi
+
+  curl -fL --retry 3 --retry-delay 5 --silent --show-error -o "${tmp}" "${url}" &
+  local curl_pid=$!
+  local last_log=0
+
+  while kill -0 "${curl_pid}" 2>/dev/null; do
+    if [[ -f "${tmp}" ]]; then
+      local now size
+      now="$(date +%s)"
+      size="$(stat -c%s "${tmp}" 2>/dev/null || echo 0)"
+      if (( now - last_log >= DOWNLOAD_LOG_INTERVAL_SEC )) || [[ "${last_log}" -eq 0 ]]; then
+        if [[ -n "${expected}" && "${expected}" -gt 0 ]]; then
+          local pct=$(( size * 100 / expected ))
+          echo "download: ${label} $(fmt_size "${size}") / $(fmt_size "${expected}") (${pct}%)"
+        else
+          echo "download: ${label} $(fmt_size "${size}")"
+        fi
+        last_log="${now}"
+      fi
+    fi
+    sleep 2
+  done
+
+  if ! wait "${curl_pid}"; then
+    rm -f "${tmp}"
+    return 1
+  fi
+
+  local final
+  final="$(stat -c%s "${tmp}")"
+  echo "download: ${label} complete $(fmt_size "${final}")"
+}
 
 declare -a WANT_LOCAL=()
 declare -a WANT_URL=()
@@ -86,7 +148,7 @@ download_if_missing() {
 
   local tmp="${dest}.part"
   echo "download: ${local_name} <- ${url}"
-  curl -fL --retry 3 --retry-delay 5 -o "${tmp}" "${url}"
+  download_with_progress "${tmp}" "${url}" "${local_name}"
   mv "${tmp}" "${dest}"
 }
 

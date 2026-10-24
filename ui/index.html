@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ru">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Whisper STT</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #0f1419;
+            --panel: #1a2332;
+            --border: #2d3a4f;
+            --text: #e8eef7;
+            --muted: #8b9cb3;
+            --accent: #3d8bfd;
+            --accent-hover: #5ca0ff;
+            --danger: #f87171;
+            --ok: #4ade80;
+        }
+
+        @media (prefers-color-scheme: light) {
+            :root {
+                --bg: #f4f7fb;
+                --panel: #ffffff;
+                --border: #d8e0ec;
+                --text: #152033;
+                --muted: #5c6b82;
+                --accent: #2563eb;
+                --accent-hover: #1d4ed8;
+                --danger: #dc2626;
+                --ok: #16a34a;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            font-size: 16px;
+            line-height: 1.5;
+            color: var(--text);
+            background:
+                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(61, 139, 253, 0.18), transparent),
+                var(--bg);
+        }
+
+        #container {
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 2rem 1.25rem 3rem;
+        }
+
+        header {
+            margin-bottom: 1.75rem;
+        }
+
+        h1 {
+            margin: 0 0 0.35rem;
+            font-size: 1.75rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .subtitle {
+            margin: 0;
+            color: var(--muted);
+            font-size: 0.95rem;
+        }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 1.25rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.4rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        select {
+            width: 100%;
+            padding: 0.65rem 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font: inherit;
+            color: var(--text);
+            background: transparent;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        @media (max-width: 520px) {
+            .row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .dropzone {
+            border: 1.5px dashed var(--border);
+            border-radius: 10px;
+            padding: 1.5rem 1rem;
+            text-align: center;
+            color: var(--muted);
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: border-color 0.15s, color 0.15s;
+            margin-bottom: 0.75rem;
+        }
+
+        .dropzone:hover,
+        .dropzone.drag {
+            border-color: var(--accent);
+            color: var(--text);
+        }
+
+        .dropzone .file-chosen {
+            color: var(--text);
+            font-weight: 600;
+        }
+
+        .dropzone .hint {
+            display: block;
+            margin-top: 0.35rem;
+            font-size: 0.8rem;
+            color: var(--muted);
+        }
+
+        #preview {
+            width: 100%;
+            margin-bottom: 0.75rem;
+            display: none;
+        }
+
+        .rec-row {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 1rem;
+        }
+
+        .btn-ghost {
+            padding: 0.45rem 0.9rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font: inherit;
+            font-size: 0.9rem;
+            color: var(--text);
+            background: transparent;
+            cursor: pointer;
+        }
+
+        .btn-ghost:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .btn-ghost.recording {
+            border-color: var(--danger);
+            color: var(--danger);
+        }
+
+        #rec_timer {
+            font-variant-numeric: tabular-nums;
+            color: var(--muted);
+            font-size: 0.9rem;
+        }
+
+        #api_token {
+            width: 100%;
+            padding: 0.55rem 0.75rem;
+            margin-bottom: 1rem;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            font: inherit;
+            color: var(--text);
+            background: var(--bg);
+        }
+
+        #btn_run {
+            width: 100%;
+            margin-top: 0.25rem;
+            padding: 0.85rem 1rem;
+            border: none;
+            border-radius: 10px;
+            font: inherit;
+            font-size: 1rem;
+            font-weight: 600;
+            color: #fff;
+            background: var(--accent);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        #btn_run:hover:not(:disabled) {
+            background: var(--accent-hover);
+        }
+
+        #btn_run:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+
+        #status {
+            margin-top: 1rem;
+            min-height: 1.25rem;
+            font-size: 0.9rem;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        #status.error {
+            color: var(--danger);
+        }
+
+        #status.ok {
+            color: var(--ok);
+        }
+
+        #result_wrap {
+            margin-top: 1rem;
+            display: none;
+        }
+
+        #result_wrap.visible {
+            display: block;
+        }
+
+        #text_out {
+            width: 100%;
+            min-height: 6rem;
+            padding: 0.85rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            font: inherit;
+            font-size: 1rem;
+            color: var(--text);
+            background: transparent;
+            resize: vertical;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .result-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.6rem;
+        }
+
+        #meta {
+            margin-top: 0.6rem;
+            font-size: 0.85rem;
+            color: var(--muted);
+            font-variant-numeric: tabular-nums;
+        }
+
+        details {
+            margin-top: 0.75rem;
+        }
+
+        summary {
+            cursor: pointer;
+            color: var(--muted);
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        td {
+            padding: 0.3rem 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td.num {
+            font-variant-numeric: tabular-nums;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        footer {
+            margin-top: 1.5rem;
+            font-size: 0.8rem;
+            color: var(--muted);
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container">
+        <header>
+            <h1>Whisper STT</h1>
+            <p class="subtitle">Распознавание речи Whisper turbo · RK3588 NPU · whisper-rknn</p>
+        </header>
+
+        <div class="panel">
+            <label>Аудио</label>
+            <div id="dropzone" class="dropzone">
+                <span id="drop_text">Нажмите или перетащите аудиофайл сюда</span>
+                <span class="hint">ogg · wav · mp3 · m4a · flac · webm · до 25 МБ</span>
+            </div>
+            <input type="file" id="file_input" accept="audio/*,.ogg,.opus,.oga,.wav,.mp3,.m4a,.aac,.flac,.webm" hidden>
+            <audio id="preview" controls></audio>
+            <div class="rec-row">
+                <button id="rec_btn" type="button" class="btn-ghost">● Записать с микрофона</button>
+                <span id="rec_timer"></span>
+            </div>
+
+            <div class="row">
+                <div>
+                    <label for="lang_select">Язык</label>
+                    <select id="lang_select">
+                        <option value="">Автоопределение</option>
+                        <option value="ru" selected>Русский</option>
+                        <option value="en">English</option>
+                        <option value="uk">Українська</option>
+                        <option value="be">Беларуская</option>
+                        <option value="de">Deutsch</option>
+                        <option value="fr">Français</option>
+                        <option value="es">Español</option>
+                        <option value="it">Italiano</option>
+                        <option value="pt">Português</option>
+                        <option value="pl">Polski</option>
+                        <option value="zh">中文</option>
+                        <option value="ja">日本語</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="format_select">Формат ответа</label>
+                    <select id="format_select">
+                        <option value="json" selected>JSON</option>
+                        <option value="verbose_json">JSON + сегменты</option>
+                        <option value="srt">SRT (субтитры)</option>
+                        <option value="vtt">VTT (субтитры)</option>
+                    </select>
+                </div>
+            </div>
+
+            <label for="api_token">API token (если задан WHISPER_API_KEY)</label>
+            <input id="api_token" type="password" placeholder="Bearer token (сохраняется локально)" autocomplete="off">
+
+            <button id="btn_run" type="button" disabled>Распознать</button>
+            <div id="status" role="status" aria-live="polite"></div>
+
+            <div id="result_wrap">
+                <textarea id="text_out" readonly rows="6"></textarea>
+                <div class="result-actions">
+                    <button id="btn_copy" type="button" class="btn-ghost">Копировать</button>
+                    <button id="btn_download" type="button" class="btn-ghost">Скачать</button>
+                </div>
+                <div id="meta"></div>
+                <details id="seg_wrap">
+                    <summary id="seg_summary">Сегменты</summary>
+                    <table>
+                        <tbody id="seg_body"></tbody>
+                    </table>
+                </details>
+            </div>
+        </div>
+
+        <footer>
+            API: <code>POST /v1/audio/transcriptions</code> · <code>GET /v1/models</code>
+        </footer>
+    </div>
+
+    <script>
+    (function () {
+        var TOKEN_KEY = 'whisper_stt_api_token';
+        var dropzone = document.getElementById('dropzone');
+        var dropText = document.getElementById('drop_text');
+        var fileInput = document.getElementById('file_input');
+        var preview = document.getElementById('preview');
+        var recBtn = document.getElementById('rec_btn');
+        var recTimer = document.getElementById('rec_timer');
+        var langEl = document.getElementById('lang_select');
+        var formatEl = document.getElementById('format_select');
+        var tokenEl = document.getElementById('api_token');
+        var btnRun = document.getElementById('btn_run');
+        var statusEl = document.getElementById('status');
+        var resultWrap = document.getElementById('result_wrap');
+        var textOut = document.getElementById('text_out');
+        var btnCopy = document.getElementById('btn_copy');
+        var btnDownload = document.getElementById('btn_download');
+        var metaEl = document.getElementById('meta');
+        var segWrap = document.getElementById('seg_wrap');
+        var segSummary = document.getElementById('seg_summary');
+        var segBody = document.getElementById('seg_body');
+
+        var file = null;
+        var previewUrl = null;
+        var recorder = null;
+        var recChunks = [];
+        var recStart = 0;
+        var recInterval = null;
+        var busy = false;
+        var lastBody = '';
+        var modelName = '';
+
+        function setStatus(msg, kind) {
+            statusEl.textContent = msg || '';
+            statusEl.className = kind || '';
+        }
+
+        function setBusy(on) {
+            busy = on;
+            btnRun.disabled = on || !file;
+            btnRun.textContent = on ? 'Распознаём…' : 'Распознать';
+        }
+
+        function authHeaders() {
+            var token = tokenEl.value.trim();
+            if (!token) return {};
+            return { Authorization: 'Bearer ' + token };
+        }
+
+        function hasAuth() {
+            return !!tokenEl.value.trim();
+        }
+
+        function fmtTime(sec) {
+            if (sec == null) return '—';
+            var m = Math.floor(sec / 60);
+            var s = (sec % 60).toFixed(2);
+            return m ? m + ':' + String(s).padStart(5, '0') : s + ' с';
+        }
+
+        function fmtBytes(n) {
+            return n >= 1048576
+                ? (n / 1048576).toFixed(1) + ' МБ'
+                : Math.max(1, Math.round(n / 1024)) + ' КБ';
+        }
+
+        function setFile(f, name) {
+            file = f;
+            dropText.innerHTML = '<span class="file-chosen">' + name + ' · ' + fmtBytes(f.size) + '</span>';
+            if (previewUrl) URL.revokeObjectURL(previewUrl);
+            previewUrl = URL.createObjectURL(f);
+            preview.src = previewUrl;
+            preview.style.display = 'block';
+            btnRun.disabled = false;
+        }
+
+        function pickFile() {
+            fileInput.click();
+        }
+
+        function startRecording() {
+            var mime = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
+                .find(function (m) { return window.MediaRecorder && MediaRecorder.isTypeSupported(m); });
+            navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+                recChunks = [];
+                recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+                recorder.ondataavailable = function (e) {
+                    if (e.data.size) recChunks.push(e.data);
+                };
+                recorder.onstop = function () {
+                    stream.getTracks().forEach(function (t) { t.stop(); });
+                    var type = recorder.mimeType || 'audio/webm';
+                    var ext = type.indexOf('mp4') >= 0 ? 'm4a' : (type.indexOf('ogg') >= 0 ? 'ogg' : 'webm');
+                    var blob = new Blob(recChunks, { type: type });
+                    var stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                    setFile(blob, 'запись-' + stamp + '.' + ext);
+                    stopRecUi();
+                };
+                recorder.start(250);
+                recStart = Date.now();
+                recInterval = setInterval(function () {
+                    var s = Math.floor((Date.now() - recStart) / 1000);
+                    recTimer.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+                }, 250);
+                recBtn.classList.add('recording');
+                recBtn.textContent = '■ Остановить запись';
+            }).catch(function (e) {
+                setStatus('Микрофон недоступен: ' + e.message + ' (нужен HTTPS и разрешение браузера)', 'error');
+            });
+        }
+
+        function stopRecording() {
+            if (recorder && recorder.state !== 'inactive') recorder.stop();
+        }
+
+        function stopRecUi() {
+            clearInterval(recInterval);
+            recBtn.classList.remove('recording');
+            recBtn.textContent = '● Записать с микрофона';
+            recTimer.textContent = '';
+        }
+
+        async function loadModel() {
+            if (!hasAuth()) {
+                setStatus('Введите API token, чтобы проверить модель');
+                return;
+            }
+            try {
+                var res = await fetch('/api/v1/models', { headers: authHeaders() });
+                if (res.status === 401) {
+                    setStatus('Токен не принят (401) — проверьте API token', 'error');
+                    return;
+                }
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                var data = await res.json();
+                var model = (data.data || [])[0];
+                if (!model) throw new Error('пустой список моделей');
+                modelName = model.id;
+                setStatus('Модель: ' + modelName, 'ok');
+            } catch (err) {
+                setStatus('Не удалось загрузить модель: ' + err.message, 'error');
+            }
+        }
+
+        async function transcribe() {
+            if (!file || busy) return;
+
+            setBusy(true);
+            setStatus('');
+            resultWrap.classList.remove('visible');
+            var t0 = performance.now();
+            var tick = setInterval(function () {
+                setStatus('Распознаём… ' + ((performance.now() - t0) / 1000).toFixed(1) + ' с');
+            }, 100);
+
+            var fd = new FormData();
+            fd.append('file', file, file.name || 'audio.webm');
+            var lang = langEl.value;
+            if (lang) fd.append('language', lang);
+            fd.append('response_format', formatEl.value);
+
+            try {
+                var res = await fetch('/api/v1/audio/transcriptions', {
+                    method: 'POST',
+                    headers: authHeaders(),
+                    body: fd,
+                });
+                lastBody = await res.text();
+                if (!res.ok) {
+                    var msg = lastBody;
+                    try {
+                        var d = JSON.parse(lastBody);
+                        msg = (d.detail && (d.detail.error && d.detail.error.message || d.detail)) || msg;
+                    } catch (_) { /* не JSON */ }
+                    throw new Error(msg || ('HTTP ' + res.status));
+                }
+                var elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+                renderResult(lastBody, formatEl.value, Number(elapsed));
+            } catch (err) {
+                setStatus('Ошибка: ' + String(err.message).slice(0, 300), 'error');
+            } finally {
+                clearInterval(tick);
+                setBusy(false);
+            }
+        }
+
+        function renderResult(body, format, elapsed) {
+            var text = body;
+            var metaParts = ['Время: ' + elapsed + ' с'];
+            if (modelName) metaParts.push('Модель: ' + modelName);
+            var segments = null;
+            var duration = null;
+            var language = null;
+
+            if (format === 'json' || format === 'verbose_json') {
+                var data = JSON.parse(body);
+                text = data.text || '';
+                if (format === 'verbose_json') {
+                    language = data.language;
+                    duration = data.duration;
+                    segments = data.segments || [];
+                    var t = data.timings || {};
+                    if (t.wall_ms != null) metaParts.push('NPU/CPU: ' + (t.wall_ms / 1000).toFixed(1) + ' с');
+                    if (t.rtf != null) metaParts.push('RTF ' + t.rtf);
+                }
+            }
+
+            if (language) metaParts.unshift('Язык: ' + language);
+            if (duration != null) metaParts.unshift('Длительность: ' + fmtTime(duration));
+
+            textOut.value = text || '(пусто)';
+            metaEl.textContent = metaParts.join(' · ');
+            if (segments && segments.length) {
+                segSummary.textContent = 'Сегменты (' + segments.length + ')';
+                segBody.innerHTML = '';
+                for (var i = 0; i < segments.length; i++) {
+                    var seg = segments[i];
+                    var tr = document.createElement('tr');
+                    var tdStart = document.createElement('td');
+                    tdStart.className = 'num';
+                    tdStart.textContent = fmtTime(seg.start);
+                    var tdEnd = document.createElement('td');
+                    tdEnd.className = 'num';
+                    tdEnd.textContent = fmtTime(seg.end);
+                    var tdText = document.createElement('td');
+                    tdText.textContent = seg.text;
+                    tr.appendChild(tdStart);
+                    tr.appendChild(tdEnd);
+                    tr.appendChild(tdText);
+                    segBody.appendChild(tr);
+                }
+                segWrap.hidden = false;
+            } else {
+                segWrap.hidden = true;
+            }
+            resultWrap.classList.add('visible');
+            setStatus('Готово', 'ok');
+        }
+
+        function downloadName() {
+            var stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            var fmt = formatEl.value;
+            var ext = fmt === 'srt' ? 'srt' : (fmt === 'vtt' ? 'vtt' : 'txt');
+            return 'transcript-' + stamp + '.' + ext;
+        }
+
+        tokenEl.addEventListener('change', function () {
+            localStorage.setItem(TOKEN_KEY, tokenEl.value.trim());
+            loadModel();
+        });
+
+        var saved = localStorage.getItem(TOKEN_KEY);
+        if (saved) tokenEl.value = saved;
+
+        fileInput.addEventListener('change', function () {
+            if (fileInput.files && fileInput.files[0]) {
+                setFile(fileInput.files[0], fileInput.files[0].name);
+            }
+        });
+
+        dropzone.addEventListener('click', pickFile);
+        ['dragenter', 'dragover'].forEach(function (ev) {
+            dropzone.addEventListener(ev, function (e) {
+                e.preventDefault();
+                dropzone.classList.add('drag');
+            });
+        });
+        ['dragleave', 'drop'].forEach(function (ev) {
+            dropzone.addEventListener(ev, function (e) {
+                e.preventDefault();
+                dropzone.classList.remove('drag');
+            });
+        });
+        dropzone.addEventListener('drop', function (e) {
+            var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+            if (f) setFile(f, f.name);
+        });
+
+        recBtn.addEventListener('click', function () {
+            if (recorder && recorder.state === 'recording') stopRecording();
+            else startRecording();
+        });
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            recBtn.disabled = true;
+            recBtn.title = 'Запись доступна только на HTTPS';
+        }
+
+        btnRun.addEventListener('click', transcribe);
+
+        btnCopy.addEventListener('click', function () {
+            if (!textOut.value) return;
+            (navigator.clipboard ? navigator.clipboard.writeText(textOut.value) : Promise.reject())
+                .then(function () {
+                    var old = btnCopy.textContent;
+                    btnCopy.textContent = 'Скопировано';
+                    setTimeout(function () { btnCopy.textContent = old; }, 1200);
+                })
+                .catch(function () {
+                    setStatus('Не удалось скопировать — выделите текст вручную', 'error');
+                });
+        });
+
+        btnDownload.addEventListener('click', function () {
+            if (!lastBody) return;
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(new Blob([lastBody], { type: 'text/plain;charset=utf-8' }));
+            a.download = downloadName();
+            a.click();
+            setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+        });
+
+        loadModel();
+    })();
+    </script>
+</body>
+
+</html>

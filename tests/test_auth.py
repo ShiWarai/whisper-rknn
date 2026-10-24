@@ -1,4 +1,4 @@
-"""Tests for OpenAI-style API key auth."""
+"""Тесты аутентификации по API-ключу в стиле OpenAI."""
 
 from __future__ import annotations
 

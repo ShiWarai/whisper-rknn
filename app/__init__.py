@@ -1,1 +1,1 @@
-# App package for runtime entrypoint.
+# Пакет приложения; точка входа runtime.

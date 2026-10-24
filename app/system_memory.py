@@ -1,4 +1,4 @@
-"""Conservative RAM forecasts from MemAvailable (see video-descriptor-rkllm system_memory)."""
+"""Консервативный прогноз RAM по MemAvailable (см. video-descriptor-rkllm system_memory)."""
 
 from __future__ import annotations
 
@@ -9,11 +9,15 @@ from typing import Optional, Tuple, Union
 PathLike = Union[str, Path]
 
 MODEL_HEADROOM = 1.15
+# Доп. RSS на каждый следующий encoder-воркер с общими весами (внутр./IO буферы).
+# Эмпирически ~0.1–0.25× файла для Whisper turbo после первого inference;
+# держим запас, чтобы gating по MemAvailable не перепускал воркеров.
+ENCODER_DUP_CONTEXT_FRACTION = 0.35
 PCM_EXPANSION_FACTOR = 20
 SAMPLE_RATE_HZ = 16_000
 BYTES_PER_FLOAT32 = 4
 MEL_TIME_FRAMES = 3000
-REQUEST_OVERHEAD_BYTES = 128 * 1024 * 1024  # PyAV / numpy / Python headroom
+REQUEST_OVERHEAD_BYTES = 128 * 1024 * 1024  # запас PyAV / numpy / Python
 DEFAULT_MAX_AUDIO_SECONDS = 600
 
 
@@ -27,7 +31,7 @@ def max_audio_seconds() -> int:
 
 
 def read_mem_available_bytes() -> Optional[int]:
-    """MemAvailable from /proc/meminfo in bytes, or None if unreadable."""
+    """MemAvailable из /proc/meminfo в байтах, или None если не прочитать."""
     try:
         with open("/proc/meminfo", encoding="ascii") as fh:
             for line in fh:
@@ -54,7 +58,7 @@ def file_size_bytes(path: PathLike) -> Optional[int]:
 
 
 def estimate_model_ram_bytes(encoder_path: PathLike, decoder_path: PathLike) -> int:
-    """Conservative RSS estimate for encoder + decoder RKNN contexts."""
+    """Консервативная оценка RSS для encoder + decoder RKNN-контекстов."""
     total = 0
     for path in (encoder_path, decoder_path):
         size = file_size_bytes(path)
@@ -64,7 +68,7 @@ def estimate_model_ram_bytes(encoder_path: PathLike, decoder_path: PathLike) -> 
 
 
 def estimate_pcm_bytes(upload_bytes: int, *, max_seconds: Optional[int] = None) -> int:
-    """Worst-case float32 PCM after decode (compressed audio expands in RAM)."""
+    """Худший случай float32 PCM после декодирования (сжатое аудио раздувается в RAM)."""
     if upload_bytes <= 0:
         return 0
     cap_seconds = max_audio_seconds() if max_seconds is None else max(1, max_seconds)
@@ -82,10 +86,11 @@ def estimate_request_ram_bytes(
     *,
     max_seconds: Optional[int] = None,
 ) -> int:
-    """Peak host RAM for one /v1/audio/transcriptions request (intentionally high)."""
+    """Пик RAM хоста на один запрос /v1/audio/transcriptions (намеренно с запасом)."""
     pcm_bytes = estimate_pcm_bytes(upload_bytes, max_seconds=max_seconds)
     mel_bytes = n_mels * MEL_TIME_FRAMES * BYTES_PER_FLOAT32
-    kv_bytes = n_text_layer * 2 * n_text_ctx * n_text_state * BYTES_PER_FLOAT32
+    # self_kv + cross_kv (each: n_text_layer × (K,V) × ctx × state)
+    kv_bytes = 2 * (n_text_layer * 2 * n_text_ctx * n_text_state * BYTES_PER_FLOAT32)
     return upload_bytes + pcm_bytes + mel_bytes + kv_bytes + REQUEST_OVERHEAD_BYTES
 
 
@@ -94,7 +99,7 @@ def format_mib(num_bytes: int) -> str:
 
 
 def has_enough_ram(required_bytes: int, *, context: str = "request peak") -> Tuple[bool, str]:
-    """Return (ok, reason). Unknown MemAvailable → allow (same as VLM)."""
+    """Вернуть (ok, reason). Неизвестный MemAvailable → разрешить (как в VLM)."""
     avail = read_mem_available_bytes()
     if avail is None:
         return True, ""
@@ -108,7 +113,7 @@ def has_enough_ram(required_bytes: int, *, context: str = "request peak") -> Tup
 
 
 def estimate_encoder_worker_ram_bytes(encoder_path: PathLike) -> int:
-    """RSS estimate for one RKNN encoder context (file × headroom)."""
+    """Оценка RSS одного RKNN encoder-контекста (файл × headroom)."""
     size = file_size_bytes(encoder_path)
     if size is None:
         return 400 * 1024 * 1024
@@ -121,12 +126,19 @@ def estimate_encoder_pool_ram_bytes(
     n_workers: int = 1,
 ) -> int:
     """
-    Host RSS estimate for decoder + N encoder RKNN contexts.
+    Оценка RSS хоста для decoder + N encoder RKNN-контекстов.
 
-    Mirrors video-descriptor ``estimateModelRamBytes`` (N × vision × 1.15 + llm).
+    Веса общие через ``rknn_dup_context``: file×headroom один раз,
+    затем допуск на контекст/IO каждого следующего воркера.
     """
     n = max(1, n_workers)
-    total = estimate_encoder_worker_ram_bytes(encoder_path) * n
+    weights = estimate_encoder_worker_ram_bytes(encoder_path)
+    size = file_size_bytes(encoder_path)
+    if size is None:
+        extra_each = 256 * 1024 * 1024
+    else:
+        extra_each = max(64 * 1024 * 1024, int(size * ENCODER_DUP_CONTEXT_FRACTION))
+    total = weights + extra_each * (n - 1)
     if decoder_path is not None:
         dec = file_size_bytes(decoder_path)
         if dec is not None:
@@ -142,11 +154,11 @@ def pick_encoder_worker_count(
     credit_bytes: int = 0,
 ) -> int:
     """
-    Largest encoder worker count that fits MemAvailable (video-descriptor
-    ``pickVisionWorkerCount``): try max → … → 1.
+    Наибольшее число encoder-воркеров, влезающее в MemAvailable
+    (video-descriptor ``pickVisionWorkerCount``): max → … → 1.
 
-    Returns 0 if even one worker does not fit. Unknown MemAvailable → try
-    ``max_workers`` (EncoderPool still probes down on NPU MALLOC_FAIL).
+    0 — если не влезает даже один. Неизвестный MemAvailable → пробуем
+    ``max_workers`` (EncoderPool всё равно уменьшит при NPU MALLOC_FAIL).
     """
     capped = max(1, int(max_workers))
     avail = read_mem_available_bytes()

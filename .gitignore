@@ -32,6 +32,8 @@ samples/vad_out/
 *.opus
 *.m4a
 *.flac
+!docs/samples/
+!docs/samples/**
 
 # IDE / инструменты
 .idea/
